@@ -1704,6 +1704,13 @@ dialog.dlg.dlg-page {
   flex-direction: column;
 }
 
+/* An author display value overrides the UA `dialog:not([open])` rule. Without
+   this, a dragged (and therefore on-screen) settings dialog keeps painting
+   after close(), so the X looks dead. */
+dialog.dlg:not([open]) {
+  display: none;
+}
+
 .set-wrap {
   display: grid;
   grid-template-columns: 172px minmax(0, 1fr);
