@@ -541,3 +541,18 @@ fn saved_views_round_trip_and_carry_a_live_count() {
     db::delete_view(&conn, all[0].id).expect("delete");
     assert_eq!(db::list_views(&conn).expect("list after delete").len(), 1);
 }
+
+#[test]
+fn version_compare_orders_release_tags_the_way_the_update_prompt_needs() {
+    use std::cmp::Ordering::*;
+    use crate::update::compare;
+
+    // Numeric components, not string order: "0.10.0" must beat "0.9.0".
+    assert_eq!(compare("0.10.0", "0.9.0"), Greater);
+    assert_eq!(compare("0.9.0", "0.9.0"), Equal);
+    assert_eq!(compare("v0.9.1", "0.9.0"), Greater, "a leading v is cosmetic");
+    assert_eq!(compare("0.9", "0.9.0"), Equal, "a missing patch is zero, not less");
+    // A pre-release is a preview *of* its version, so it sorts below the release.
+    assert_eq!(compare("1.0.0-beta", "1.0.0"), Less);
+    assert_eq!(compare("1.0.0-beta", "0.9.9"), Greater);
+}
