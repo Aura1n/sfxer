@@ -45,29 +45,23 @@
       </header>
 
       <main class="body">
-        <nav class="sidebar" id="sidebar" aria-label="范围、标签与来源">
+        <nav class="sidebar" id="sidebar" aria-label="范围与标签">
           <section class="side-block">
             <div class="side-head"><span data-icon="library"></span><span>范围</span></div>
             <div class="side-list" id="scopes"></div>
           </section>
 
           <section class="side-block grow">
-            <div class="side-head">
-              <span data-icon="tag"></span><span>标签</span>
+            <div class="side-head" id="tags-head">
+              <span data-icon="tag" class="head-icon"></span><span class="head-title">标签</span>
+              <input id="tag-filter" class="head-input" type="search" spellcheck="false" placeholder="查找标签" aria-label="查找标签" hidden />
+              <input id="new-tag" class="head-input" type="text" spellcheck="false" placeholder="新标签，回车创建" aria-label="新建标签" hidden />
+              <span class="head-cmds">
+                <button class="mini-cmd" id="btn-tag-search" title="查找标签" aria-label="查找标签"><span data-icon="search"></span></button>
+                <button class="mini-cmd" id="btn-tag-add" title="新建标签" aria-label="新建标签"><span data-icon="add"></span></button>
+              </span>
             </div>
-            <input id="tag-filter" class="mini-input" type="search" spellcheck="false" placeholder="查找标签" aria-label="查找标签" />
             <div class="side-list grow" id="tags"></div>
-            <div class="tag-add">
-              <input id="new-tag" type="text" spellcheck="false" placeholder="新建标签" aria-label="新建标签" />
-            </div>
-          </section>
-
-          <section class="side-block src-block">
-            <div class="side-head">
-              <span data-icon="folder"></span><span>来源</span>
-              <button class="mini-cmd" id="btn-add-folder-2" title="添加文件夹" aria-label="添加文件夹"><span data-icon="add"></span></button>
-            </div>
-            <div class="side-list" id="roots"></div>
           </section>
         </nav>
 

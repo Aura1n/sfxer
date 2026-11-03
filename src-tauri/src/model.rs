@@ -48,6 +48,7 @@ pub struct TrackDetail {
     pub decodeable: bool,
     pub notes: String,
     pub tag_ids: Vec<i64>,
+    pub rating: i64,
     pub added_at: i64,
     pub play_count: i64,
     pub last_played_at: Option<i64>,
@@ -125,6 +126,9 @@ pub struct Filter {
     pub sample_rates: Vec<i64>,
     #[serde(default)]
     pub channels: Vec<i64>,
+    /// Keep only tracks rated at least this many stars; 0 means no limit.
+    #[serde(default)]
+    pub min_rating: i64,
     #[serde(default)]
     pub sort: String,
     #[serde(default)]
@@ -154,6 +158,7 @@ impl Default for Filter {
             durations: Vec::new(),
             sample_rates: Vec::new(),
             channels: Vec::new(),
+            min_rating: 0,
             sort: "name".into(),
             dir: "asc".into(),
             offset: 0,
@@ -276,6 +281,8 @@ pub struct ManifestEntry {
     pub notes: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub rating: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]

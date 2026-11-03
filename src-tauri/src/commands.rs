@@ -191,6 +191,11 @@ pub fn update_tags(state: State<AppState>, ids: Vec<i64>, add: Vec<i64>, remove:
     db::update_track_tags(&conn(&state.db), &ids, &add, &remove).map_err(fail)
 }
 
+#[tauri::command]
+pub fn set_rating(state: State<AppState>, ids: Vec<i64>, rating: i64) -> Cmd<()> {
+    db::set_rating(&conn(&state.db), &ids, rating).map_err(fail)
+}
+
 /// Drops library rows only; the audio files are never touched.
 #[tauri::command]
 pub fn remove_tracks(state: State<AppState>, ids: Vec<i64>) -> Cmd<usize> {

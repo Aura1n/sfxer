@@ -6,17 +6,18 @@ Windows 10 / 11 x64，Tauri 2 + Rust，单文件约 8 MB。
 
 ## 数据说明
 
-标签、备注、显示名、波形峰值全部写在本机 SQLite 库里（`%APPDATA%\dev.zara.sfxer\sfx.db`）。程序只读取音频文件，从不写入、改名、移动或删除它们；从库中「移除」也只是删除数据库里的条目。
+标签、备注、显示名、评分、波形峰值全部写在本机 SQLite 库里（`%APPDATA%\dev.zara.sfxer\sfx.db`）。程序只读取音频文件，从不写入、改名、移动或删除它们；从库中「移除」也只是删除数据库里的条目。
 
 ## 功能
 
 - 递归扫描添加的文件夹，任意深度；跳过 `node_modules`、`$RECYCLE.BIN`，`.` 与 `_` 开头的目录可在设置里选择是否包含
 - 支持扩展名：mp3 / wav / flac / ogg / opus / m4a / aac / aif / caf / wma / ape / mpc / wv / mka / mkv / dsf / 3gp / amr / ac3 等
-- 搜索名称、显示名、标签与备注；按格式、时长、采样率、声道、峰值是否溢出筛选
-- 波形解码与峰值分析，可按峰值 dB 排序、筛出削顶文件
+- 搜索名称、显示名、标签与备注；按格式、时长、采样率、声道、评分星级筛选
+- 详情栏五星评分，只写数据库，不碰文件元数据
+- 波形解码与峰值分析，可按峰值 dB 排序
 - 批量打标、批量备注、整理模式（`T`）逐条连续打标
 - 底部播放条：波形拖动定位、音量、顺序播放 / 列表循环 / 单曲循环，当前筛选列表即播放队列
-- 标签与备注可导出为 JSON，换机后导入合并
+- 来源文件夹在设置 → 导入与扫描里管理；标签、备注与评分可导出为 JSON，换机后导入合并
 
 ## 构建
 
@@ -25,7 +26,7 @@ npm install
 cd src-tauri && cargo build --release   # 产物 src-tauri/target/release/sfxer.exe
 npx tauri build                          # 另需联网下载 NSIS 工具，产出安装包
 node tools/make-test-audio.mjs          # 生成 test-library/ 样例音频（不入库）
-cargo test --lib                         # 15 项后端测试，依赖上一步生成的样例音频
+cargo test --lib                         # 18 项后端测试，依赖上一步生成的样例音频
 ```
 
 ## 快捷键

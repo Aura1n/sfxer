@@ -35,6 +35,7 @@
   --sel-bg: rgba(0, 103, 192, 0.1);
   --danger: #c42b1c;
   --warn: #9d5d00;
+  --star: #d9a406;
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.05);
   --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.16);
   --shadow-dlg: 0 16px 40px rgba(0, 0, 0, 0.24);
@@ -62,6 +63,7 @@ html[data-theme="dark"] {
   --sel-bg: rgba(76, 194, 255, 0.12);
   --danger: #ff6b61;
   --warn: #f2b84b;
+  --star: #f6b93b;
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.55);
   --shadow-dlg: 0 16px 40px rgba(0, 0, 0, 0.6);
@@ -90,6 +92,7 @@ html[data-theme="dark"] {
     --sel-bg: rgba(76, 194, 255, 0.12);
     --danger: #ff6b61;
     --warn: #f2b84b;
+    --star: #f6b93b;
     --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-flyout: 0 8px 24px rgba(0, 0, 0, 0.55);
     --shadow-dlg: 0 16px 40px rgba(0, 0, 0, 0.6);
@@ -443,8 +446,44 @@ html.resizing * {
   color: var(--text-2);
 }
 
-.mini-cmd {
+/* The tag header doubles as the search/create field, so the two states must
+   occupy the same line height and never shift the list below. */
+.head-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.head-cmds {
+  display: flex;
+  gap: 2px;
   margin-left: auto;
+}
+
+.head-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--stroke);
+  border-bottom: 1px solid var(--stroke-strong);
+  border-radius: 4px;
+  color: var(--text-1);
+  font: 400 12.5px var(--font-display);
+  outline: none;
+}
+
+.head-input:focus {
+  border-bottom-color: var(--accent);
+  background: var(--bg-layer);
+}
+
+.head-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+
+.mini-cmd {
   display: grid;
   place-items: center;
   width: 24px;
@@ -532,77 +571,8 @@ html.resizing * {
   color: var(--text-2);
 }
 
-.side-item .act {
-  display: none;
-  width: 22px;
-  height: 22px;
-  border-radius: 4px;
-  place-items: center;
-  color: var(--text-2);
-}
-
-.side-item:hover .act {
-  display: grid;
-}
-
-.side-item .act:hover {
-  background: var(--bg-pressed);
-  color: var(--text-1);
-}
-
-/* Sources are read, not browsed: a compact status strip pinned under the tags. */
-.src-block .side-list {
-  max-height: 132px;
-  padding-bottom: 2px;
-}
-
-.src-block .side-item {
-  height: 27px;
-  font-size: 12px;
-}
-
 .side-item .count.warn {
   color: var(--warn);
-}
-
-.mini-input {
-  height: 28px;
-  margin: 2px 8px 4px 4px;
-  padding: 0 8px;
-  background: var(--bg-input);
-  border: 1px solid var(--stroke);
-  border-bottom: 1px solid var(--stroke-strong);
-  border-radius: 4px;
-  color: var(--text-1);
-  font: inherit;
-  outline: none;
-}
-
-.mini-input:focus {
-  border-bottom-color: var(--accent);
-  background: var(--bg-layer);
-}
-
-.tag-add {
-  padding: 4px 8px 2px 4px;
-}
-
-.tag-add input {
-  width: 100%;
-  height: 28px;
-  padding: 0 8px;
-  background: var(--bg-input);
-  border: 1px solid var(--stroke);
-  border-bottom: 1px solid var(--stroke-strong);
-  border-radius: 4px;
-  color: var(--text-1);
-  font: inherit;
-  outline: none;
-}
-
-.tag-add input:focus {
-  border-bottom-color: var(--accent);
-  background: var(--bg-layer);
 }
 
 /* ---------- list ---------- */
@@ -1338,6 +1308,38 @@ input[type="range"]::-webkit-slider-thumb {
 
 .meta-grid dd.warn {
   color: var(--danger);
+}
+
+/* Star row sits in the metadata grid's value column, so it inherits the same
+   baseline as the monospace readings around it. */
+dd.stars {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  font-family: var(--font-display);
+}
+
+.stars .star {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--stroke-strong);
+}
+
+.stars .star svg {
+  width: 15px;
+  height: 15px;
+}
+
+.stars .star:hover {
+  background: var(--bg-hover);
+  color: var(--star);
+}
+
+.stars .star.on {
+  color: var(--star);
 }
 
 .d-actions {

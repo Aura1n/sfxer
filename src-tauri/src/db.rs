@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS tracks(
   clipped        INTEGER NOT NULL DEFAULT 0,
   peaks          BLOB,
   notes          TEXT NOT NULL DEFAULT '',
+  rating         INTEGER NOT NULL DEFAULT 0,
   search_text    TEXT NOT NULL DEFAULT '',
   added_at       INTEGER NOT NULL,
   play_count     INTEGER NOT NULL DEFAULT 0,
@@ -85,8 +86,24 @@ pub fn open(db_path: &Path) -> AppResult<SharedDb> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "busy_timeout", 10_000)?;
     conn.execute_batch(SCHEMA)?;
+    add_missing_columns(&conn)?;
     seed_settings(&conn)?;
     Ok(Arc::new(Mutex::new(conn)))
+}
+
+/// `CREATE TABLE IF NOT EXISTS` never revisits an existing table, so a column
+/// that arrived after the first release has to be bolted on for libraries that
+/// are already on disk.
+fn add_missing_columns(conn: &Connection) -> AppResult<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(tracks)")?;
+    let have = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|x| x.ok())
+        .collect::<Vec<String>>();
+    if !have.iter().any(|c| c == "rating") {
+        conn.execute("ALTER TABLE tracks ADD COLUMN rating INTEGER NOT NULL DEFAULT 0", [])?;
+    }
+    Ok(())
 }
 
 fn seed_settings(conn: &Connection) -> AppResult<()> {
@@ -434,6 +451,10 @@ fn build_where(f: &Filter, args: &mut Args) -> String {
             w.push(g);
         }
     }
+    if f.min_rating > 0 {
+        let i = args.push(f.min_rating);
+        w.push(format!("t.rating >= ?{i}"));
+    }
     if !f.durations.is_empty() {
         let mut parts = Vec::new();
         for bucket in &f.durations {
@@ -589,7 +610,7 @@ pub fn track_detail(conn: &Connection, id: i64) -> AppResult<TrackDetail> {
         .query_row(
             r#"SELECT id, name, alias, ext, dir, path, size_bytes, mtime, duration_ms, sample_rate,
                       bit_depth, channels, bitrate, codec, container, peak_db, rms_db, decodeable,
-                      notes, added_at, play_count, last_played_at
+                      notes, added_at, play_count, last_played_at, rating
                FROM tracks WHERE id = ?1"#,
             params![id],
             |r| {
@@ -614,6 +635,7 @@ pub fn track_detail(conn: &Connection, id: i64) -> AppResult<TrackDetail> {
                     decodeable: r.get::<_, i64>(17)? != 0,
                     notes: r.get(18)?,
                     tag_ids: Vec::new(),
+                    rating: r.get(22)?,
                     added_at: r.get(19)?,
                     play_count: r.get(20)?,
                     last_played_at: r.get(21)?,
@@ -710,6 +732,17 @@ pub fn set_notes(conn: &Connection, ids: &[i64], text: &str, mode: &str) -> AppR
         };
         upd.execute(params![id, value])?;
         reindex_one(conn, *id)?;
+    }
+    Ok(())
+}
+
+/// Stars are library-only metadata, so nothing is reindexed and no file is
+/// touched: one clamped value is written for every id handed over.
+pub fn set_rating(conn: &Connection, ids: &[i64], rating: i64) -> AppResult<()> {
+    let rating = rating.clamp(0, 5);
+    let mut upd = conn.prepare("UPDATE tracks SET rating = ?2 WHERE id = ?1")?;
+    for id in ids {
+        upd.execute(params![id, rating])?;
     }
     Ok(())
 }
@@ -1044,13 +1077,14 @@ pub fn export_rows(conn: &Connection) -> AppResult<Vec<ManifestEntry>> {
             tag_of.entry(track_id).or_default().push(name);
         }
     }
-    let mut stmt = conn.prepare("SELECT id, path, alias, notes FROM tracks ORDER BY path")?;
+    let mut stmt = conn.prepare("SELECT id, path, alias, notes, rating FROM tracks ORDER BY path")?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, Option<String>>(2)?,
             r.get::<_, String>(3)?,
+            r.get::<_, i64>(4)?,
         ))
     })?;
     let mut out = Vec::new();
@@ -1060,6 +1094,7 @@ pub fn export_rows(conn: &Connection) -> AppResult<Vec<ManifestEntry>> {
             alias: row.2,
             notes: row.3,
             tags: tag_of.remove(&row.0).unwrap_or_default(),
+            rating: row.4,
         });
     }
     Ok(out)
@@ -1078,6 +1113,9 @@ pub fn apply_manifest_entry(conn: &Connection, entry: &ManifestEntry) -> AppResu
     }
     if !entry.notes.trim().is_empty() {
         set_notes(conn, std::slice::from_ref(&id), &entry.notes, "replace")?;
+    }
+    if entry.rating > 0 {
+        set_rating(conn, std::slice::from_ref(&id), entry.rating)?;
     }
     let mut tag_ids = Vec::new();
     for name in &entry.tags {

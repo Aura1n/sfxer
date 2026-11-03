@@ -19,7 +19,6 @@
     { key: "ch", label: "声道", w: "44px", sort: "channels", align: "right" },
     { key: "fmt", label: "格式", w: "52px", sort: "ext" },
     { key: "size", label: "大小", w: "66px", sort: "size", align: "right" },
-    { key: "peak", label: "峰值", w: "52px", sort: "peak_db", align: "right" },
     { key: "tags", label: "标签", w: "minmax(64px, 1fr)" },
     { key: "act", w: "26px", fixed: true },
   ];
@@ -29,7 +28,6 @@
     { id: "untagged", label: "未打标签", icon: "tagOff" },
     { id: "notes", label: "有备注", icon: "note" },
     { id: "recent", label: "最近导入", icon: "history" },
-    { id: "clipped", label: "峰值溢出", icon: "warning", countKey: "clipped" },
     { id: "undecodable", label: "不可解码", icon: "broken", countKey: "undecodable" },
   ];
 
@@ -57,6 +55,7 @@
       durations: [],
       sampleRates: [],
       channels: [],
+      minRating: 0,
       sort: "name",
       dir: "asc",
       offset: 0,
@@ -93,9 +92,9 @@
     rowsVirtual: $("rows-virtual"),
     listEmpty: $("list-empty"),
     colsHead: $("cols-head"),
-    roots: $("roots"),
     scopes: $("scopes"),
     tags: $("tags"),
+    tagsHead: $("tags-head"),
     tagFilter: $("tag-filter"),
     newTag: $("new-tag"),
     detail: $("detail"),
@@ -240,9 +239,6 @@
           break;
         case "size":
           cells.push(el("span", "num", F.bytes(r.sizeBytes).replace(/ /g, "\u2009")));
-          break;
-        case "peak":
-          cells.push(el("span", "num", r.peakDb === null || r.peakDb === undefined ? "—" : F.db(r.peakDb)));
           break;
         case "tags": {
           const t = el("span", "tags-cell");
@@ -416,101 +412,39 @@
   }
 
   /* ----------------------------------------------------------------- sources */
-  // Where the audio came from is bookkeeping, not navigation: rows are a status
-  // strip, so a left click no longer re-scopes the list and the scan time lives
-  // in the tooltip instead of an extra line per source.
+  // Sources are configuration rather than navigation, so they live in
+  // 设置 → 导入与扫描; there is nothing to repaint until that pane is on screen.
   function renderRoots() {
-    dom.roots.textContent = "";
+    const host = document.getElementById("roots-host");
+    if (!host) return;
+    host.textContent = "";
     if (!S.roots.length) {
-      const d = el("div", "side-item");
-      d.style.color = "var(--text-3)";
-      d.appendChild(el("span", "name", "尚未添加文件夹"));
-      dom.roots.appendChild(d);
+      host.appendChild(setRow("尚未添加文件夹", "添加一个目录，程序递归找出其中全部音频，不移动也不改写文件", null));
       return;
     }
     for (const r of S.roots) {
-      const on = S.filter.scope === "root" && S.filter.rootId === r.id;
-      const item = el("div", "side-item" + (on ? " on" : ""));
-      item.appendChild(iconEl("folder"));
-      const name = el("span", "name", r.label);
-      item.appendChild(name);
-      const count = el("span", "count" + (r.lastScanAt ? "" : " warn"), r.lastScanAt ? F.num(r.count) : "未扫描");
-      item.appendChild(count);
-
-      const resc = el("span", "act");
-      resc.innerHTML = icon("sync");
-      resc.title = "重新扫描该来源";
-      resc.addEventListener("click", (e) => {
-        e.stopPropagation();
-        api.scan(r.id, true);
+      const ctl = el("div", "ctl-row");
+      const only = el("button", "btn subtle", "只看这个来源");
+      only.addEventListener("click", () => {
+        dom.dlgSettings.close();
+        S.filter.scope = "root";
+        S.filter.rootId = r.id;
+        renderScopes();
+        reload();
       });
-      item.appendChild(resc);
-
-      const rm = el("span", "act");
-      rm.innerHTML = icon("remove");
-      rm.title = "从库中移除（不删除文件）";
-      rm.addEventListener("click", (e) => {
-        e.stopPropagation();
-        removeRoot(r);
-      });
-      item.appendChild(rm);
-
-      item.title = `${r.path}\n${F.num(r.count)} 项 · ${r.lastScanAt ? "扫描于 " + F.ago(r.lastScanAt) : "尚未扫描"}\n右键可只看这个来源`;
-      item.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        sourceMenu(item, r);
-      });
-      dom.roots.appendChild(item);
+      const resc = el("button", "btn subtle", "重新扫描");
+      resc.addEventListener("click", () => api.scan(r.id, true));
+      const rm = el("button", "btn subtle", "移除");
+      rm.style.color = "var(--danger)";
+      rm.addEventListener("click", () => removeRoot(r));
+      ctl.append(only, resc, rm);
+      const desc = `${r.path} · ${F.num(r.count)} 项 · ${r.lastScanAt ? "扫描于 " + F.ago(r.lastScanAt) : "尚未扫描"}`;
+      host.appendChild(setRow(r.label, desc, ctl));
     }
   }
 
-  function sourceMenu(anchor, r) {
-    const box = el("div", "flyout");
-    box.style.position = "fixed";
-    const rect = anchor.getBoundingClientRect();
-    box.style.top = `${Math.max(4, rect.top - 132)}px`;
-    box.style.left = `${Math.min(rect.left, window.innerWidth - 260)}px`;
-    const close = () => box.remove();
-
-    box.appendChild(el("div", "grp", r.label));
-
-    const only = menuItem("只看这个来源", "filter");
-    only.addEventListener("click", () => {
-      close();
-      S.filter.scope = "root";
-      S.filter.rootId = r.id;
-      renderScopes();
-      renderRoots();
-      reload();
-    });
-    box.appendChild(only);
-
-    const scan = menuItem("重新扫描", "sync");
-    scan.addEventListener("click", () => {
-      close();
-      api.scan(r.id, true);
-    });
-    box.appendChild(scan);
-
-    const rm = menuItem("从库中移除", "remove", "danger");
-    rm.addEventListener("click", () => {
-      close();
-      removeRoot(r);
-    });
-    box.appendChild(rm);
-
-    document.body.appendChild(box);
-    const onDoc = (e) => {
-      if (!box.contains(e.target)) {
-        box.remove();
-        document.removeEventListener("pointerdown", onDoc, true);
-      }
-    };
-    setTimeout(() => document.addEventListener("pointerdown", onDoc, true), 0);
-  }
-
   function removeRoot(r) {
-    confirm(`从库中移除「${r.label}」及其 ${F.num(r.count)} 个条目的标签与备注？磁盘上的文件不会被删除。`).then((ok) => {
+    confirm(`从库中移除「${r.label}」及其 ${F.num(r.count)} 个条目的标签、备注与评分？磁盘上的文件不会被删除。`).then((ok) => {
       if (ok) api.removeRoot(r.id).then(refreshAll);
     });
   }
@@ -571,14 +505,13 @@
       item.appendChild(el("span", "name", t.name));
       item.appendChild(el("span", "count", F.num(t.useCount)));
 
-      const edit = el("span", "act");
-      edit.innerHTML = icon("dots");
-      edit.title = "重命名 / 颜色 / 删除";
-      edit.addEventListener("click", (e) => {
-        e.stopPropagation();
-        tagMenu(edit, t);
+      // The row itself carries the edit menu, so no trailing button is needed
+      // and the list stays a list rather than a strip of controls.
+      item.title = "右键：重命名 / 颜色 / 删除";
+      item.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        tagMenu(item, t);
       });
-      item.appendChild(edit);
 
       // One tag at a time: picking a tag shows its files, picking it again
       // drops the filter. Stacking tags read as a filter you could not see.
@@ -880,59 +813,11 @@
     pen.addEventListener("click", openAliasEditor);
     nameEl.addEventListener("dblclick", openAliasEditor);
 
-    const actions = el("div", "d-actions");
-    const reveal = el("button", "btn");
-    reveal.innerHTML = icon("folderOpen") + "<span>定位文件</span>";
-    reveal.addEventListener("click", () => api.reveal(d.id));
-    actions.appendChild(reveal);
-
-    const copyPath = el("button", "btn");
-    copyPath.innerHTML = icon("copy") + "<span>复制路径</span>";
-    copyPath.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(d.path);
-        copyPath.querySelector("span").textContent = "已复制";
-        setTimeout(() => (copyPath.querySelector("span").textContent = "复制路径"), 1200);
-      } catch (_) {}
-    });
-    actions.appendChild(copyPath);
-
-    const rm = el("button", "btn subtle");
-    rm.innerHTML = icon("remove") + "<span>移出库</span>";
-    rm.style.color = "var(--danger)";
-    rm.addEventListener("click", () =>
-      confirm(`把「${d.alias || d.name}」从库中移除？文件保留在磁盘，其标签与备注会被删除。`).then(async (ok) => {
-        if (ok) {
-          await api.removeTracks([d.id]);
-          S.sel.delete(d.id);
-          await refreshAll();
-        }
-      })
-    );
-    actions.appendChild(rm);
-    head.appendChild(actions);
     // Playback lives in the bar under the list, so the panel only explains a file
     // the machine cannot preview at all.
     if (!d.decodeable) {
       head.appendChild(el("div", "bulk-note", "该文件使用本机无法解码的编码（如 WMA），仍可检索、打标与备注。"));
     }
-
-    const metaSec = section("属性", "info");
-    const dl = el("dl", "meta-grid");
-    kv(dl, "时长", F.ms(d.durationMs));
-    kv(dl, "采样率", d.sampleRate ? F.hz(d.sampleRate) : "—");
-    kv(dl, "位深", d.bitDepth ? `${d.bitDepth} bit` : "—");
-    kv(dl, "声道", d.channels ? F.ch(d.channels) : "—");
-    kv(dl, "编码", d.codec || "—");
-    kv(dl, "容器", d.container || "—");
-    kv(dl, "码率", d.bitrate ? F.bitrate(d.bitrate) : "—");
-    kv(dl, "大小", F.bytes(d.sizeBytes));
-    kv(dl, "峰值", d.peakDb === null || d.peakDb === undefined ? "—" : `${F.db(d.peakDb)} dBFS`, d.peakDb >= -0.1 ? "warn" : null);
-    kv(dl, "平均", d.rmsDb === null || d.rmsDb === undefined ? "—" : `${F.db(d.rmsDb)} dBFS`);
-    kv(dl, "文件修改", F.date(d.mtimeMs ? Math.floor(d.mtimeMs / 1000) : d.mtime));
-    kv(dl, "加入库", F.date(d.addedAt));
-    if (d.playCount) kv(dl, "播放", `${d.playCount} 次 · ${F.ago(d.lastPlayedAt)}`);
-    metaSec.appendChild(dl);
 
     const tagSec = section("标签", "tag");
     const editorHost = el("div", "tag-editor");
@@ -970,6 +855,47 @@
       setTimeout(() => (saved.textContent = ""), 1600);
     }, 450);
     ta.addEventListener("input", saveNotes);
+
+    // 属性 comes last: everything above is what the person edits, everything
+    // below is what the machine measured.
+    const metaSec = section("属性", "info");
+    const dl = el("dl", "meta-grid");
+    metaSec.appendChild(dl);
+
+    // Stars are library-only metadata, so a click writes the database and
+    // leaves the audio file untouched.
+    const stars = el("dd", "stars");
+    const paintStars = (n) => [...stars.children].forEach((b, i) => b.classList.toggle("on", i < n));
+    for (let i = 1; i <= 5; i++) {
+      const b = el("button", "star");
+      b.type = "button";
+      b.innerHTML = icon("star");
+      b.setAttribute("aria-label", `评为 ${i} 星`);
+      b.addEventListener("click", async () => {
+        const next = d.rating === i ? 0 : i;
+        await api.setRating([d.id], next);
+        d.rating = next;
+        paintStars(next);
+        flash(next ? `评为 ${next} 星` : "已取消评分");
+      });
+      stars.appendChild(b);
+    }
+    dl.append(el("dt", null, "评分"), stars);
+    paintStars(d.rating || 0);
+
+    kv(dl, "时长", F.ms(d.durationMs));
+    kv(dl, "采样率", d.sampleRate ? F.hz(d.sampleRate) : "—");
+    kv(dl, "位深", d.bitDepth ? `${d.bitDepth} bit` : "—");
+    kv(dl, "声道", d.channels ? F.ch(d.channels) : "—");
+    kv(dl, "编码", d.codec || "—");
+    kv(dl, "容器", d.container || "—");
+    kv(dl, "码率", d.bitrate ? F.bitrate(d.bitrate) : "—");
+    kv(dl, "大小", F.bytes(d.sizeBytes));
+    kv(dl, "峰值", d.peakDb === null || d.peakDb === undefined ? "—" : `${F.db(d.peakDb)} dBFS`, d.peakDb >= -0.1 ? "warn" : null);
+    kv(dl, "平均", d.rmsDb === null || d.rmsDb === undefined ? "—" : `${F.db(d.rmsDb)} dBFS`);
+    kv(dl, "文件修改", F.date(d.mtimeMs ? Math.floor(d.mtimeMs / 1000) : d.mtime));
+    kv(dl, "加入库", F.date(d.addedAt));
+    if (d.playCount) kv(dl, "播放", `${d.playCount} 次 · ${F.ago(d.lastPlayedAt)}`);
 
     renderStatus();
   }
@@ -1376,6 +1302,7 @@
     if (f.sampleRates.length) n++;
     if (f.channels.length) n++;
     if (f.undecodableOnly) n++;
+    if (f.minRating > 0) n++;
     return n;
   }
 
@@ -1384,7 +1311,22 @@
     // Called again on every checkbox click, so it must not append to itself.
     box.textContent = "";
     const durCount = new Map((S.stats.durations || []).map((d) => [d.value, d.count]));
+    // Rating is a floor rather than a set, and it never leaves the database —
+    // the audio files themselves stay untouched.
     const groups = [
+      {
+        title: "评分",
+        key: "minRating",
+        single: true,
+        items: [
+          { v: 0, label: "不限" },
+          { v: 1, label: "≥ 1 星" },
+          { v: 2, label: "≥ 2 星" },
+          { v: 3, label: "≥ 3 星" },
+          { v: 4, label: "≥ 4 星" },
+          { v: 5, label: "≥ 5 星" },
+        ],
+      },
       { title: "格式", key: "formats", items: (S.stats.formats || []).map((x) => ({ v: x.value, label: x.value.toUpperCase().replace(".", ""), count: x.count })) },
       { title: "采样率", key: "sampleRates", items: (S.stats.sampleRates || []).map((x) => ({ v: Number(x.value), label: F.hz(Number(x.value)), count: x.count })) },
       { title: "声道", key: "channels", items: (S.stats.channels || []).map((x) => ({ v: Number(x.value), label: F.ch(Number(x.value)), count: x.count })) },
@@ -1407,16 +1349,20 @@
       for (const it of g.items) {
         const b = el("button", "mi");
         b.type = "button";
-        const cb = el("span", "check" + (f[g.key].includes(it.v) ? " on" : ""));
+        const on = g.single ? f[g.key] === it.v : f[g.key].includes(it.v);
+        const cb = el("span", "check" + (on ? " on" : ""));
         cb.innerHTML = icon("check");
         b.appendChild(cb);
         b.appendChild(el("span", null, it.label));
         if (it.count !== undefined && it.count !== null) b.appendChild(el("span", "key", F.num(it.count)));
         b.addEventListener("click", () => {
-          const arr = f[g.key];
-          const i = arr.indexOf(it.v);
-          if (i >= 0) arr.splice(i, 1);
-          else arr.push(it.v);
+          if (g.single) f[g.key] = on ? 0 : it.v;
+          else {
+            const arr = f[g.key];
+            const i = arr.indexOf(it.v);
+            if (i >= 0) arr.splice(i, 1);
+            else arr.push(it.v);
+          }
           buildFilterFlyout(box);
           updateFilterBadge();
           reload();
@@ -1432,6 +1378,7 @@
       f.durations = [];
       f.sampleRates = [];
       f.channels = [];
+      f.minRating = 0;
       updateFilterBadge();
       buildFilterFlyout(box);
       reload();
@@ -1555,6 +1502,16 @@
       await api.rebuildPeaks();
     });
     scan.appendChild(setRow("重建全部波形", "修改精度或升级解码器后使用；大库需要数分钟", rb));
+
+    const src = setGroup("来源", "folder");
+    const add = el("button", "btn subtle");
+    add.innerHTML = icon("folderAdd") + "<span>添加文件夹</span>";
+    add.addEventListener("click", addFolder);
+    src.appendChild(setRow("添加文件夹", "扫描是递归的，任意深度的子文件夹都会一并收录", add));
+    const host = el("div");
+    host.id = "roots-host";
+    src.appendChild(host);
+    renderRoots();
   }
 
   function paneData() {
@@ -1590,7 +1547,7 @@
       setTimeout(() => (imp.querySelector("span").textContent = "导入"), 2200);
     });
     io.append(ex, imp);
-    data.appendChild(setRow("标签与备注备份", "导出为 JSON，换机器或重装后可再导入", io));
+    data.appendChild(setRow("标签、备注与评分备份", "导出为 JSON，换机器或重装后可再导入", io));
   }
 
   function paneUpdate() {
@@ -1644,7 +1601,7 @@
   function paneAbout() {
     const about = setGroup("关于", "info");
     about.appendChild(
-      setRow("音频文件", "标签、备注与显示名只写本机数据库，原始文件从不被修改或移动", null)
+      setRow("音频文件", "标签、备注、显示名与评分只写本机数据库，原始文件从不被修改或移动", null)
     );
     about.appendChild(
       setRow(
@@ -1821,6 +1778,7 @@
       const t = S.tags.find((x) => x.id === S.filter.tagIds[0]);
       parts.push(t ? `标签「${t.name}」` : `标签 ${S.filter.tagIds.length} 个`);
     }
+    if (S.filter.minRating > 0) parts.push(`≥ ${S.filter.minRating} 星`);
     dom.statusCount.textContent = parts.join(" · ");
     dom.statusSel.textContent = S.rows.length && S.rows.length < S.total ? `已加载 ${F.num(S.rows.length)}` : "";
   }
@@ -1886,7 +1844,6 @@
     dom.btnSettingsClose.addEventListener("click", () => dom.dlgSettings.close());
     makeDraggable(dom.dlgSettings, dom.settingsHead);
     $("btn-add-folder").addEventListener("click", addFolder);
-    $("btn-add-folder-2").addEventListener("click", addFolder);
     $("btn-rescan").addEventListener("click", () => api.scan(null, false));
 
     dom.search.addEventListener("input", debounce(() => {
@@ -1902,6 +1859,35 @@
       reload();
     });
 
+    // The tag header doubles as the find and create field, so the list is no
+    // longer framed by two inputs that sit empty most of the time.
+    const headBits = {
+      icon: dom.tagsHead.querySelector(".head-icon"),
+      title: dom.tagsHead.querySelector(".head-title"),
+      cmds: dom.tagsHead.querySelector(".head-cmds"),
+    };
+    function setTagHead(mode) {
+      headBits.icon.hidden = mode !== "title";
+      headBits.title.hidden = mode !== "title";
+      headBits.cmds.hidden = mode !== "title";
+      dom.tagFilter.hidden = mode !== "search";
+      dom.newTag.hidden = mode !== "add";
+      if (mode !== "title") (mode === "search" ? dom.tagFilter : dom.newTag).focus();
+    }
+    const collapse = (input) => {
+      input.addEventListener("blur", () => !input.value.trim() && setTagHead("title"));
+      input.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape") return;
+        input.value = "";
+        setTagHead("title");
+        if (input === dom.tagFilter) renderTags();
+      });
+    };
+    collapse(dom.tagFilter);
+    collapse(dom.newTag);
+    $("btn-tag-search").addEventListener("click", () => setTagHead("search"));
+    $("btn-tag-add").addEventListener("click", () => setTagHead("add"));
+
     dom.tagFilter.addEventListener("input", renderTags);
     dom.newTag.addEventListener("keydown", async (e) => {
       if (e.key !== "Enter") return;
@@ -1911,6 +1897,7 @@
         .filter(Boolean);
       if (!names.length) return;
       e.target.value = "";
+      setTagHead("title");
       const ids = await ensureTags(names);
       S.filter.tagIds = ids;
       await refreshTags();

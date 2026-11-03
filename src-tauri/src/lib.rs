@@ -70,6 +70,7 @@ pub fn run() {
             commands::set_alias,
             commands::set_notes,
             commands::update_tags,
+            commands::set_rating,
             commands::remove_tracks,
             commands::reveal,
             commands::open_db_folder,

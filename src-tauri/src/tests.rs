@@ -299,11 +299,13 @@ fn manifest_export_restores_onto_a_fresh_database() {
     db::set_notes(&conn, &[id], "下次换个更短的", "append").unwrap();
     let tag = db::create_tag(&conn, "UI", None).unwrap();
     db::update_track_tags(&conn, &[id], &[tag.id], &[]).unwrap();
+    db::set_rating(&conn, &[id], 4).unwrap();
 
     let rows = db::export_rows(&conn).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].tags, vec!["UI".to_string()], "tags travel by name, not by id");
     assert!(rows[0].notes.contains("下次换个更短的"));
+    assert_eq!(rows[0].rating, 4);
 
     // A second library that indexed the same file with unrelated ids.
     let other_db = temp_db("manifest-restore");
@@ -312,14 +314,17 @@ fn manifest_export_restores_onto_a_fresh_database() {
     assert!(db::apply_manifest_entry(&other, &rows[0]).unwrap());
     let restored = db::query(&other, &Filter { text: "轻点击".into(), ..Default::default() }).unwrap();
     assert_eq!(restored.total, 1);
-    assert_eq!(db::track_detail(&other, restored.items[0].id).unwrap().tag_ids.len(), 1);
+    let detail = db::track_detail(&other, restored.items[0].id).unwrap();
+    assert_eq!(detail.tag_ids.len(), 1);
     assert_eq!(db::list_tags(&other).unwrap().len(), 1);
+    assert_eq!(detail.rating, 4, "stars survive a backup round trip");
 
     let missing = ManifestEntry {
         path: library().join("no-such-file.wav").to_string_lossy().to_string(),
         alias: None,
         notes: "orphan".into(),
         tags: vec![],
+        rating: 0,
     };
     assert!(!db::apply_manifest_entry(&other, &missing).unwrap(), "an unknown path is skipped, never inserted");
 }
@@ -555,4 +560,50 @@ fn version_compare_orders_release_tags_the_way_the_update_prompt_needs() {
     // A pre-release is a preview *of* its version, so it sorts below the release.
     assert_eq!(compare("1.0.0-beta", "1.0.0"), Less);
     assert_eq!(compare("1.0.0-beta", "0.9.9"), Greater);
+}
+
+#[test]
+fn reopening_a_library_that_predates_the_rating_column_adds_it() {
+    let path = std::env::temp_dir().join("sfx-manager-test-rating-migration.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+
+    let db = db::open(&path).expect("first open creates the schema");
+    db.lock()
+        .unwrap()
+        .execute_batch("ALTER TABLE tracks DROP COLUMN rating")
+        .expect("shrink the table to the pre-rating shape");
+    drop(db);
+
+    // A library already on disk never re-runs CREATE TABLE, so the column has
+    // to arrive on reopen or every rating query would fail.
+    let db = db::open(&path).expect("reopening adds the column back");
+    let conn = db.lock().unwrap();
+    db::upsert_track(&conn, &placeholder_track(), false).unwrap();
+    let id = db::query(&conn, &Filter::default()).unwrap().items[0].id;
+    db::set_rating(&conn, &[id], 4).expect("rating writes land");
+    assert_eq!(db::track_detail(&conn, id).unwrap().rating, 4);
+}
+
+#[test]
+fn stars_are_clamped_to_five_and_a_floor_filters_the_list() {
+    let db = temp_db("rating-filter");
+    let conn = db.lock().unwrap();
+    db::upsert_track(&conn, &placeholder_track(), false).unwrap();
+    let id = db::query(&conn, &Filter::default()).unwrap().items[0].id;
+
+    db::set_rating(&conn, &[id], 9).expect("out-of-range clamps rather than errors");
+    assert_eq!(db::track_detail(&conn, id).unwrap().rating, 5);
+    db::set_rating(&conn, &[id], -2).expect("a negative means unrated");
+    assert_eq!(db::track_detail(&conn, id).unwrap().rating, 0);
+
+    db::set_rating(&conn, &[id], 3).expect("rate");
+    let mut f = Filter::default();
+    f.min_rating = 4;
+    assert_eq!(db::query(&conn, &f).unwrap().total, 0, "three stars is below a four-star floor");
+    f.min_rating = 3;
+    assert_eq!(db::query(&conn, &f).unwrap().total, 1);
+    f.min_rating = 0;
+    assert_eq!(db::query(&conn, &f).unwrap().total, 1, "no floor keeps everything");
 }
