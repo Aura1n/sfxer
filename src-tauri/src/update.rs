@@ -28,6 +28,8 @@ struct RawRelease {
     tag_name: String,
     html_url: String,
     #[serde(default)]
+    draft: bool,
+    #[serde(default)]
     body: Option<String>,
 }
 
@@ -57,7 +59,9 @@ pub fn compare(a: &str, b: &str) -> Ordering {
 }
 
 pub fn latest(current: &str) -> Result<Release, String> {
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    // The list endpoint, not `/releases/latest`: that one hides pre-releases,
+    // so a beta-only project would report every check as a failure.
+    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=100");
     let mut cmd = Command::new("curl.exe");
     cmd.args(["-sS", "-L", "--max-time", "10", "-H", "Accept: application/vnd.github+json", url.as_str()]);
     #[cfg(windows)]
@@ -70,7 +74,12 @@ pub fn latest(current: &str) -> Result<Release, String> {
         let text = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if text.is_empty() { "检查更新失败，可能是没有网络".into() } else { text });
     }
-    let raw: RawRelease = serde_json::from_slice(&out.stdout).map_err(|_| "更新源返回了无法识别的内容".to_string())?;
+    let all: Vec<RawRelease> = serde_json::from_slice(&out.stdout).map_err(|_| "更新源返回了无法识别的内容".to_string())?;
+    let raw = all
+        .into_iter()
+        .filter(|r| !r.draft)
+        .max_by(|a, b| compare(&a.tag_name, &b.tag_name))
+        .ok_or("仓库还没有发布版本")?;
     let version = raw.tag_name.trim_start_matches('v').to_string();
     let notes: String = raw.body.unwrap_or_default().trim().chars().take(500).collect();
     Ok(Release { newer: compare(&version, current) == Ordering::Greater, version, url: raw.html_url, notes })
