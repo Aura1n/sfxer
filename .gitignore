@@ -1,0 +1,9 @@
+node_modules/
+src-tauri/target/
+src-tauri/gen/schemas/
+release/
+test-library/
+*.tmp
+*.log
+Thumbs.db
+desktop.ini

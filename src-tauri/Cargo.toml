@@ -1,0 +1,37 @@
+[package]
+name = "sfxer"
+version = "0.9.0"
+description = "Local audio asset manager with tags, notes and instant search"
+edition = "2021"
+rust-version = "1.85"
+
+[lib]
+name = "sfxer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+walkdir = "2"
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "chrono"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+lofty = "0.25"
+symphonia = { version = "0.6", default-features = false, features = ["all-codecs", "all-formats", "all-meta", "opt-simd"] }
+symphonia-adapter-opus-rs = "0.1"
+rodio = { version = "0.23", default-features = false, features = ["playback", "flac", "mp3", "wav", "vorbis", "mp4"] }
+rfd = { version = "0.15", default-features = false }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

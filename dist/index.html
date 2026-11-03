@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sfxer</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <header class="commandbar">
+        <button class="qcmd" id="btn-sidebar" title="资源库 (Ctrl+B)" aria-label="切换侧栏"><span data-icon="panelLeft"></span></button>
+
+        <div class="cmd-group">
+          <div class="menu-anchor">
+            <button class="qcmd" id="btn-filter" title="筛选" aria-haspopup="true" aria-expanded="false" aria-label="筛选">
+              <span data-icon="filter"></span><em id="filter-badge" class="badge" hidden></em>
+            </button>
+            <div class="flyout" id="flyout-filter" hidden></div>
+          </div>
+          <div class="menu-anchor">
+            <button class="qcmd" id="btn-sort" title="排序" aria-haspopup="true" aria-expanded="false" aria-label="排序">
+              <span data-icon="sort"></span>
+            </button>
+            <div class="flyout" id="flyout-sort" hidden></div>
+          </div>
+          <button class="qcmd" id="btn-rescan" title="重新扫描 (Ctrl+R)" aria-label="重新扫描"><span data-icon="sync"></span></button>
+          <button class="qcmd" id="btn-detail" title="详情面板 (Ctrl+I)" aria-label="切换详情"><span data-icon="panel"></span></button>
+        </div>
+
+        <div class="spacer"></div>
+
+        <div class="search-wrap">
+          <span class="search-glyph" data-icon="search"></span>
+          <input id="search" type="search" spellcheck="false" autocomplete="off" placeholder="搜索名称、标签、备注" aria-label="搜索" />
+          <button class="clear-btn" id="btn-search-clear" title="清除" aria-label="清除搜索"><span data-icon="clear"></span></button>
+        </div>
+
+        <button class="cta" id="btn-add-folder"><span data-icon="folderAdd"></span><span>添加文件夹</span></button>
+
+        <div class="cmd-group">
+          <button class="qcmd" id="btn-theme" title="主题" aria-label="切换主题"><span data-icon="moon"></span></button>
+          <button class="qcmd" id="btn-settings" title="设置" aria-label="设置"><span data-icon="settings"></span></button>
+        </div>
+      </header>
+
+      <main class="body">
+        <nav class="sidebar" id="sidebar" aria-label="范围、标签与来源">
+          <section class="side-block">
+            <div class="side-head"><span data-icon="library"></span><span>范围</span></div>
+            <div class="side-list" id="scopes"></div>
+          </section>
+
+          <section class="side-block grow">
+            <div class="side-head">
+              <span data-icon="tag"></span><span>标签</span>
+              <div class="match-toggle" role="group" aria-label="标签匹配方式">
+                <button id="match-any" class="on">任一</button>
+                <button id="match-all">全部</button>
+              </div>
+            </div>
+            <input id="tag-filter" class="mini-input" type="search" spellcheck="false" placeholder="查找标签" aria-label="查找标签" />
+            <div class="side-list grow" id="tags"></div>
+            <div class="tag-add">
+              <input id="new-tag" type="text" spellcheck="false" placeholder="新建标签" aria-label="新建标签" />
+            </div>
+          </section>
+
+          <section class="side-block src-block">
+            <div class="side-head">
+              <span data-icon="folder"></span><span>来源</span>
+              <button class="mini-cmd" id="btn-add-folder-2" title="添加文件夹" aria-label="添加文件夹"><span data-icon="add"></span></button>
+            </div>
+            <div class="side-list" id="roots"></div>
+          </section>
+        </nav>
+
+        <div class="grip grip-left" id="grip-sidebar" role="separator" aria-orientation="vertical" tabindex="0"
+             aria-label="调整侧栏宽度" aria-valuemin="180" aria-valuemax="440" aria-valuenow="232"
+             title="拖动调整侧栏宽度 · 双击恢复默认"></div>
+
+        <section class="list-pane">
+          <div class="cols-head" id="cols-head"></div>
+          <div class="rows-scroll" id="rows-scroll">
+            <div class="rows-virtual" id="rows-virtual"></div>
+            <p class="list-empty" id="list-empty" hidden></p>
+          </div>
+        </section>
+
+        <div class="grip grip-right" id="grip-detail" role="separator" aria-orientation="vertical" tabindex="0"
+             aria-label="调整详情栏宽度" aria-valuemin="330" aria-valuemax="660" aria-valuenow="372"
+             title="拖动调整详情栏宽度 · 双击恢复默认"></div>
+
+        <aside class="detail" id="detail" aria-label="详情">
+          <div class="detail-empty" id="detail-empty">未选择条目</div>
+          <div class="detail-body" id="detail-body" hidden></div>
+        </aside>
+      </main>
+
+      <div id="playerbar" aria-label="播放控制"></div>
+
+      <footer class="statusbar">
+        <span id="status-count">—</span>
+        <span id="status-sel"></span>
+        <span id="status-msg" hidden></span>
+        <div class="spacer"></div>
+        <div class="progress" id="progress" hidden>
+          <div class="progress-track"><div class="progress-bar" id="progress-bar"></div></div>
+          <span id="progress-text"></span>
+        </div>
+      </footer>
+    </div>
+
+    <dialog id="dlg-settings" class="dlg dlg-page">
+      <div class="dlg-head" id="dlg-settings-head">
+        <h2>设置</h2>
+        <div class="spacer"></div>
+        <button class="qcmd" id="btn-settings-close" aria-label="关闭"><span data-icon="close"></span></button>
+      </div>
+      <div class="set-wrap">
+        <nav class="set-nav" id="settings-nav" aria-label="设置分组"></nav>
+        <div class="set-main" id="settings-body"></div>
+      </div>
+    </dialog>
+
+    <dialog id="dlg-confirm" class="dlg small">
+      <form method="dialog">
+        <div class="dlg-body"><p id="confirm-text"></p></div>
+        <div class="dlg-foot">
+          <button class="btn" value="cancel">取消</button>
+          <button class="btn accent" id="confirm-ok" value="ok">确定</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- api.js defines window.DOMX, which tag-render.js destructures at load. -->
+    <script src="./api.js"></script>
+    <script src="./tag-render.js"></script>
+    <script src="./player-view.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

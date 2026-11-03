@@ -1,0 +1,13 @@
+{
+  "name": "sfxer",
+  "private": true,
+  "version": "0.9.0",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icon": "tauri icon tools/icon-source.png"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
