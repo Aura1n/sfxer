@@ -1593,14 +1593,18 @@ html[data-theme="dark"] .flyout .check.on {
   color: var(--text-2);
 }
 
-/* Backend errors surface here; long messages ellipsize instead of wrapping
-   the 28px bar. */
+/* Confirmations read as ordinary text; only failures get the error colour.
+   Long messages ellipsize instead of wrapping the 28px bar. */
 #status-msg {
   min-width: 0;
   max-width: 42ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text-1);
+}
+
+#status-msg.err {
   color: var(--danger);
 }
 

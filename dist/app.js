@@ -1563,7 +1563,7 @@
     repo.type = "button";
     repo.appendChild(el("span", null, S.appInfo ? S.appInfo.repo : "…"));
     repo.appendChild(iconEl("export"));
-    repo.addEventListener("click", () => api.openLink(S.appInfo.repoUrl).catch(() => flash("无法打开浏览器")));
+    repo.addEventListener("click", () => api.openLink(S.appInfo.repoUrl).catch(() => flash("无法打开浏览器", "err")));
     g.appendChild(setRow("GitHub 仓库", "点击在浏览器中打开项目主页", repo));
 
     const row = el("div", "set-row");
@@ -1592,7 +1592,7 @@
         btn.disabled = false;
       }
     });
-    go.addEventListener("click", () => release && api.openLink(release.url).catch(() => flash("无法打开浏览器")));
+    go.addEventListener("click", () => release && api.openLink(release.url).catch(() => flash("无法打开浏览器", "err")));
     ctl.append(btn, go);
     row.append(text, ctl);
     g.appendChild(row);
@@ -1796,8 +1796,9 @@
     dom.progressText.textContent = `${p.phase} ${F.num(p.done)}${p.total ? "/" + F.num(p.total) : ""}`;
   }
 
-  function flash(msg) {
+  function flash(msg, kind) {
     dom.statusMsg.textContent = msg;
+    dom.statusMsg.classList.toggle("err", kind === "err");
     dom.statusMsg.hidden = !msg;
     clearTimeout(flash.t);
     if (msg) flash.t = setTimeout(() => (dom.statusMsg.hidden = true), 6000);
@@ -2302,14 +2303,14 @@
     // swallowing it in the console.
     window.addEventListener("unhandledrejection", (e) => {
       const msg = typeof e.reason === "string" ? e.reason : (e.reason && e.reason.message) || "";
-      if (msg && !/drag-drop/i.test(msg)) flash(msg);
+      if (msg && !/drag-drop/i.test(msg)) flash(msg, "err");
       e.preventDefault();
     });
 
     // A throw inside a click handler is otherwise invisible, and an invisible
     // failure looks exactly like a control that does nothing.
     window.addEventListener("error", (e) => {
-      if (e.message) flash(`界面错误：${e.message}`);
+      if (e.message) flash(`界面错误：${e.message}`, "err");
     });
 
     // player position poll: only while something is playing, at 8 Hz
@@ -2342,7 +2343,7 @@
         await refreshAll();
         // Silence here reads as "the drop did nothing".
         if (added) flash(`已添加 ${added} 个文件夹${rejected ? `，${rejected}` : ""}`);
-        else if (rejected) flash(rejected);
+        else if (rejected) flash(rejected, "err");
       });
     } catch (err) {
       console.warn("drag&drop unavailable:", err);
