@@ -774,8 +774,9 @@
     pendingRename = () => stop(true);
   }
 
-  function renderSingle(d) {
-    const head = section();
+  // Both the single panel and the triage queue headline the same way, so the
+  // pen, the double-click editor and the alias repaint live in one place.
+  function aliasHead(d) {
     const box = el("div", "d-title");
     const nameRow = el("div", "d-namerow");
     const nameEl = el("div", "d-name", d.alias || d.name);
@@ -789,7 +790,6 @@
     nameRow.append(nameEl, pen, fileEl);
     box.appendChild(nameRow);
     box.appendChild(el("div", "d-path", d.path));
-    head.appendChild(box);
 
     const paintAlias = (v) => {
       nameEl.textContent = v || d.name;
@@ -812,6 +812,12 @@
     };
     pen.addEventListener("click", openAliasEditor);
     nameEl.addEventListener("dblclick", openAliasEditor);
+    return box;
+  }
+
+  function renderSingle(d) {
+    const head = section();
+    head.appendChild(aliasHead(d));
 
     // Playback lives in the bar under the list, so the panel only explains a file
     // the machine cannot preview at all.
@@ -1035,7 +1041,10 @@
     if (delta > 0 && r && r.tagIds && r.tagIds.length) {
       S.rows.splice(S.triage.i, 1);
       S.total = Math.max(0, S.total - 1);
-      if (!S.rows.length) return exitTriage();
+      if (!S.rows.length) {
+        flash("整理完成，队列已清空");
+        return exitTriage();
+      }
       if (S.triage.i >= S.rows.length) S.triage.i = S.rows.length - 1;
       ensureCursorVisible(S.triage.i);
       selectRow(S.triage.i, null);
@@ -1043,7 +1052,12 @@
     }
     const next = S.triage.i + delta;
     if (next < 0) return;
-    if (next >= S.rows.length) return exitTriage();
+    // The end of the queue is not the end of the session: a stray click on the
+    // last item used to quit mid-listen. Only 退出整理 / Esc leaves early.
+    if (next >= S.rows.length) {
+      flash("已经是最后一条");
+      return;
+    }
     S.triage.i = next;
     ensureCursorVisible(next);
     selectRow(next, null);
@@ -1066,7 +1080,10 @@
     r.tagIds = ids.concat(tagId);
     S.rows.splice(S.triage.i, 1);
     S.total = Math.max(0, S.total - 1);
-    if (!S.rows.length) return exitTriage();
+    if (!S.rows.length) {
+      flash("整理完成，队列已清空");
+      return exitTriage();
+    }
     if (S.triage.i >= S.rows.length) S.triage.i = S.rows.length - 1;
     flash(`「${(t && t.name) || ""}」 · 剩余 ${F.num(S.rows.length)}`);
     ensureCursorVisible(S.triage.i);
@@ -1089,11 +1106,7 @@
     top.append(bar, prog);
 
     const head = section();
-    const nameRow = el("div", "d-namerow");
-    nameRow.appendChild(el("div", "d-name", d.alias || d.name));
-    if (d.alias) nameRow.appendChild(el("div", "d-file", d.name));
-    head.appendChild(nameRow);
-    head.appendChild(el("div", "d-path", d.path));
+    head.appendChild(aliasHead(d));
 
     const tagSec = section("打标签", "tag");
     const qs = quickTags();

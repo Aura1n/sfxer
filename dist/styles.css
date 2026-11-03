@@ -1,5 +1,8 @@
 /* Windows 11 Fluent tokens, light + dark, following the system unless overridden. */
 :root {
+  /* Without this the native select popup, scrollbars and other UA widgets stay
+     light while the app is dark. */
+  color-scheme: light;
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
   --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
@@ -45,6 +48,7 @@
 }
 
 html[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #1a1a1a;
   --bg-layer: #242424;
   --bg-card: #2b2b2b;
@@ -74,6 +78,7 @@ html[data-theme="dark"] {
 
 @media (prefers-color-scheme: dark) {
   html:not([data-theme]) {
+    color-scheme: dark;
     --bg: #1a1a1a;
     --bg-layer: #242424;
     --bg-card: #2b2b2b;
