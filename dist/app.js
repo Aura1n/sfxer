@@ -51,7 +51,6 @@
     return {
       text: "",
       tagIds: [],
-      tagMatch: "any",
       scope: "all",
       rootId: null,
       formats: [],
@@ -581,9 +580,10 @@
       });
       item.appendChild(edit);
 
+      // One tag at a time: picking a tag shows its files, picking it again
+      // drops the filter. Stacking tags read as a filter you could not see.
       item.addEventListener("click", () => {
-        if (sel.has(t.id)) S.filter.tagIds = S.filter.tagIds.filter((x) => x !== t.id);
-        else S.filter.tagIds = [...S.filter.tagIds, t.id];
+        S.filter.tagIds = sel.has(t.id) ? [] : [t.id];
         renderTags();
         reload();
       });
@@ -1817,7 +1817,10 @@
     const parts = [`${F.num(S.total)} 项`];
     if (S.sel.size) parts.push(`选中 ${S.sel.size}`);
     if (S.filter.text) parts.push(`“${S.filter.text}”`);
-    if (S.filter.tagIds.length) parts.push(`${S.filter.tagMatch === "all" ? "且含" : "含任一"} ${S.filter.tagIds.length} 标签`);
+    if (S.filter.tagIds.length) {
+      const t = S.tags.find((x) => x.id === S.filter.tagIds[0]);
+      parts.push(t ? `标签「${t.name}」` : `标签 ${S.filter.tagIds.length} 个`);
+    }
     dom.statusCount.textContent = parts.join(" · ");
     dom.statusSel.textContent = S.rows.length && S.rows.length < S.total ? `已加载 ${F.num(S.rows.length)}` : "";
   }
@@ -1909,13 +1912,10 @@
       if (!names.length) return;
       e.target.value = "";
       const ids = await ensureTags(names);
-      S.filter.tagIds = [...new Set([...S.filter.tagIds, ...ids])];
+      S.filter.tagIds = ids;
       await refreshTags();
       reload();
     });
-
-    $("match-any").addEventListener("click", () => setMatch("any"));
-    $("match-all").addEventListener("click", () => setMatch("all"));
 
     flyoutFor($("btn-filter"), $("flyout-filter"), buildFilterFlyout);
     flyoutFor($("btn-sort"), $("flyout-sort"), buildSortFlyout);
@@ -1972,13 +1972,6 @@
     matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
       if (S.settings.theme === "system" || !S.settings.theme) window.PlayerView.draw();
     });
-  }
-
-  function setMatch(m) {
-    S.filter.tagMatch = m;
-    $("match-any").classList.toggle("on", m === "any");
-    $("match-all").classList.toggle("on", m === "all");
-    reload();
   }
 
   function togglePane(which) {

@@ -583,36 +583,6 @@ html.resizing * {
   background: var(--bg-layer);
 }
 
-.match-toggle {
-  margin-left: auto;
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--radius-ctl);
-  background: var(--bg-input);
-  border: 1px solid var(--stroke);
-}
-
-.match-toggle button {
-  padding: 1px 8px;
-  border-radius: 4px;
-  font: 400 11px var(--font);
-  color: var(--text-2);
-}
-
-.match-toggle button:hover {
-  background: var(--bg-hover);
-}
-
-.match-toggle button.on {
-  background: var(--accent);
-  color: #fff;
-}
-
-html[data-theme="dark"] .match-toggle button.on {
-  color: #00131f;
-}
-
 .tag-add {
   padding: 4px 8px 2px 4px;
 }
