@@ -542,12 +542,29 @@
     return b;
   }
 
+  // A fixed-position menu opens at the pointer (or below its anchor), but the
+  // window edge is a hard limit: the part pushed past it is simply not painted,
+  // so the menu flips above when there is no room below and is kept fully
+  // inside the viewport. Callers pass the bottom edge of the "below" box and
+  // the bottom edge of the "above" box (anchor top or pointer y).
+  function placeFixedMenu(box, x, below, above) {
+    box.style.position = "fixed";
+    document.body.appendChild(box);
+    const m = 6;
+    const w = box.offsetWidth;
+    const h = box.offsetHeight;
+    const left = Math.max(m, Math.min(x, window.innerWidth - w - m));
+    const top =
+      below + h <= window.innerHeight - m
+        ? below
+        : Math.max(m, Math.min(above - h, window.innerHeight - h - m));
+    box.style.left = `${left}px`;
+    box.style.top = `${top}px`;
+  }
+
   function tagMenu(anchor, tag) {
     const box = el("div", "flyout");
-    box.style.position = "fixed";
     const r = anchor.getBoundingClientRect();
-    box.style.top = `${r.bottom + 4}px`;
-    box.style.left = `${Math.min(r.left, window.innerWidth - 260)}px`;
 
     const swatchRow = el("div", "rowform");
     swatchRow.appendChild(el("span", "hint", "颜色"));
@@ -591,7 +608,7 @@
     box.appendChild(del);
 
     const close = () => box.remove();
-    document.body.appendChild(box);
+    placeFixedMenu(box, r.left, r.bottom + 4, r.top - 4);
     const onDoc = (e) => {
       if (!box.contains(e.target) && e.target !== anchor) {
         box.remove();
@@ -2124,9 +2141,6 @@
 
   function rowContextMenu(x, y) {
     const box = el("div", "flyout");
-    box.style.position = "fixed";
-    box.style.top = `${y}px`;
-    box.style.left = `${Math.min(x, window.innerWidth - 240)}px`;
     const ids = [...S.sel];
 
     const mi = (label, iconName, fn, opts) => {
@@ -2176,7 +2190,7 @@
       }
     }), { danger: true });
 
-    document.body.appendChild(box);
+    placeFixedMenu(box, x, y, y);
     const onDoc = (e) => {
       if (!box.contains(e.target)) {
         box.remove();
