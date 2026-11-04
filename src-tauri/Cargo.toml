@@ -1,6 +1,6 @@
 [package]
 name = "sfxer"
-version = "0.9.1"
+version = "0.9.2"
 description = "Local audio asset manager with tags, notes and instant search"
 edition = "2021"
 rust-version = "1.85"
