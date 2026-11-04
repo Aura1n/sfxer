@@ -1,8 +1,9 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
@@ -87,6 +88,115 @@ fn mtime_secs(meta: &Metadata) -> i64 {
         .unwrap_or(0)
 }
 
+/// One finished file, sent from a probe worker to the single database writer.
+struct ProbeMsg {
+    path: String,
+    skipped: bool,
+    result: ProbeResult,
+}
+
+enum ProbeResult {
+    Track { track: NewTrack, existed: bool },
+    Skip,
+    Error,
+}
+
+type Fingerprints = HashMap<String, (i64, i64, i64)>;
+
+/// Pure per-file work: stat, compare with the library, probe, decode. Runs on
+/// several threads at once, so it never touches the database.
+fn probe_file(
+    path: &Path,
+    root_id: i64,
+    indexed: &Fingerprints,
+    force: bool,
+    settings: &Settings,
+    buckets: usize,
+) -> ProbeMsg {
+    let db_path = db::strip_verbatim(&path.to_string_lossy());
+    let Ok(meta) = path.metadata() else {
+        return ProbeMsg { path: db_path, skipped: false, result: ProbeResult::Error };
+    };
+    if meta.len() < settings.min_size_bytes.max(0) as u64 {
+        return ProbeMsg { path: db_path, skipped: true, result: ProbeResult::Skip };
+    }
+    let mtime = mtime_secs(&meta);
+    let existing = indexed.get(&db_path.to_lowercase());
+
+    if let Some((_, old_size, old_mtime)) = existing {
+        if !force && *old_size == meta.len() as i64 && *old_mtime == mtime {
+            return ProbeMsg { path: db_path, skipped: true, result: ProbeResult::Skip };
+        }
+    }
+
+    let meta_info = match probe::read_meta(path) {
+        Ok(m) => m,
+        Err(_) => return ProbeMsg { path: db_path, skipped: false, result: ProbeResult::Error },
+    };
+    let wave = if settings.gen_peaks { probe::read_wave(path, buckets).ok() } else { None };
+    let (name, ext, dir) = split_path(&db_path);
+
+    let track = NewTrack {
+        path: db_path.clone(),
+        name,
+        ext,
+        dir,
+        root_id: Some(root_id),
+        size_bytes: meta.len() as i64,
+        mtime,
+        duration_ms: meta_info.duration_ms,
+        sample_rate: meta_info.sample_rate,
+        bit_depth: meta_info.bit_depth,
+        channels: meta_info.channels,
+        bitrate: meta_info.bitrate,
+        codec: meta_info.codec,
+        container: meta_info.container,
+        peak_db: wave.as_ref().map(|w| w.peak_db),
+        rms_db: wave.as_ref().map(|w| w.rms_db),
+        decodeable: wave.is_some(),
+        clipped: wave.as_ref().map(|w| w.clipped).unwrap_or(false),
+        peaks: wave.as_ref().map(|w| db::peaks_to_bytes(&w.peaks)),
+    };
+
+    ProbeMsg {
+        path: db_path,
+        skipped: false,
+        result: ProbeResult::Track { track, existed: existing.is_some() },
+    }
+}
+
+/// Decoding is CPU-bound, so a handful of workers saturate a modern laptop
+/// without starving the UI thread or thrashing a spinning disk.
+fn worker_count() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 8)
+}
+
+const WRITE_BATCH: usize = 256;
+
+fn flush_batch(db: &SharedDb, batch: &mut Vec<NewTrack>, force: bool) {
+    if batch.is_empty() {
+        return;
+    }
+    if let Ok(conn) = db.lock() {
+        // One transaction per batch instead of one autocommit per row: 30k files
+        // otherwise pay 30k journal syncs.
+        match conn.unchecked_transaction() {
+            Ok(tx) => {
+                for t in batch.iter() {
+                    let _ = db::upsert_track(&tx, t, force);
+                }
+                let _ = tx.commit();
+            }
+            Err(_) => {
+                for t in batch.iter() {
+                    let _ = db::upsert_track(&conn, t, force);
+                }
+            }
+        }
+    }
+    batch.clear();
+}
+
 /// Walks each root, probing only what changed. Runs on its own thread; `app`
 /// exists purely to publish progress.
 pub fn run(
@@ -128,85 +238,75 @@ pub fn run(
             Err(_) => break,
         };
 
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut done = 0i64;
-        let mut last_emit = Instant::now();
+        let seen: HashSet<String> = candidates
+            .iter()
+            .map(|p| db::strip_verbatim(&p.to_string_lossy()).to_lowercase())
+            .collect();
 
-        for path in &candidates {
-            if control.abort.load(Ordering::SeqCst) {
-                break;
-            }
-            done += 1;
-            summary.scanned += 1;
+        let cursor = AtomicUsize::new(0);
+        let (tx, rx) = mpsc::sync_channel::<ProbeMsg>(512);
 
-            let db_path = db::strip_verbatim(&path.to_string_lossy());
-            let key = db_path.to_lowercase();
-            seen.insert(key.clone());
-
-            let Ok(meta) = path.metadata() else {
-                summary.errors += 1;
-                continue;
-            };
-            if meta.len() < settings.min_size_bytes.max(0) as u64 {
-                continue;
-            }
-            let mtime = mtime_secs(&meta);
-
-            if let Some((_, old_size, old_mtime)) = indexed.get(&key) {
-                if !force && *old_size == meta.len() as i64 && *old_mtime == mtime {
-                    if last_emit.elapsed().as_millis() > 220 {
-                        emit(&app, "检查", done, total, &db_path);
-                        last_emit = Instant::now();
+        std::thread::scope(|scope| {
+            for _ in 0..worker_count() {
+                let tx = tx.clone();
+                let candidates = &candidates;
+                let indexed = &indexed;
+                let settings = &settings;
+                let control = &control;
+                let cursor = &cursor;
+                scope.spawn(move || loop {
+                    if control.abort.load(Ordering::Relaxed) {
+                        break;
                     }
-                    continue;
+                    let i = cursor.fetch_add(1, Ordering::Relaxed);
+                    if i >= candidates.len() {
+                        break;
+                    }
+                    let msg = probe_file(&candidates[i], *root_id, indexed, force, settings, buckets);
+                    if tx.send(msg).is_err() {
+                        break;
+                    }
+                });
+            }
+            drop(tx);
+
+            let mut batch: Vec<NewTrack> = Vec::with_capacity(WRITE_BATCH);
+            let mut phase = "解析";
+            let mut current = String::new();
+
+            loop {
+                match rx.recv_timeout(Duration::from_millis(220)) {
+                    Ok(msg) => {
+                        summary.scanned += 1;
+                        current = msg.path;
+                        phase = if msg.skipped { "检查" } else { "解析" };
+                        match msg.result {
+                            ProbeResult::Track { track, existed } => {
+                                if existed {
+                                    summary.updated += 1;
+                                } else {
+                                    summary.added += 1;
+                                }
+                                batch.push(track);
+                                if batch.len() >= WRITE_BATCH {
+                                    flush_batch(&db, &mut batch, force);
+                                }
+                            }
+                            ProbeResult::Skip => {}
+                            ProbeResult::Error => summary.errors += 1,
+                        }
+                    }
+                    // A long file can take longer than the emit interval, so the
+                    // timeout also keeps the progress line moving.
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        flush_batch(&db, &mut batch, force);
+                        emit(&app, phase, summary.scanned, total, &current);
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
-                summary.updated += 1;
-            } else {
-                summary.added += 1;
             }
-
-            let meta_info = match probe::read_meta(path) {
-                Ok(m) => m,
-                Err(_) => {
-                    summary.errors += 1;
-                    continue;
-                }
-            };
-
-            let wave = if settings.gen_peaks { probe::read_wave(path, buckets).ok() } else { None };
-            let (name, ext, dir) = split_path(&db_path);
-
-            let track = NewTrack {
-                path: db_path.clone(),
-                name,
-                ext,
-                dir,
-                root_id: Some(*root_id),
-                size_bytes: meta.len() as i64,
-                mtime,
-                duration_ms: meta_info.duration_ms,
-                sample_rate: meta_info.sample_rate,
-                bit_depth: meta_info.bit_depth,
-                channels: meta_info.channels,
-                bitrate: meta_info.bitrate,
-                codec: meta_info.codec,
-                container: meta_info.container,
-                peak_db: wave.as_ref().map(|w| w.peak_db),
-                rms_db: wave.as_ref().map(|w| w.rms_db),
-                decodeable: wave.is_some(),
-                clipped: wave.as_ref().map(|w| w.clipped).unwrap_or(false),
-                peaks: wave.as_ref().map(|w| db::peaks_to_bytes(&w.peaks)),
-            };
-
-            if let Ok(conn) = db.lock() {
-                let _ = db::upsert_track(&conn, &track, force);
-            }
-
-            if last_emit.elapsed().as_millis() > 220 {
-                emit(&app, "解析", done, total, &db_path);
-                last_emit = Instant::now();
-            }
-        }
+            flush_batch(&db, &mut batch, force);
+        });
 
         // Anything recorded under this root that the walk did not see and that
         // no longer exists on disk leaves the library.
