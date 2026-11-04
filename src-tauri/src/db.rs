@@ -996,12 +996,14 @@ pub fn db_path_of(conn: &Connection) -> Option<PathBuf> {
     conn.path().map(PathBuf::from)
 }
 
-/// Path → (id, size, mtime) for one root (or the whole library), so the scanner
-/// can compare fingerprints without a query per file.
-pub fn fingerprint_map(conn: &Connection, root_id: Option<i64>) -> AppResult<HashMap<String, (i64, i64, i64)>> {
+/// Path → (id, size, mtime, missing metadata) for one root (or the whole
+/// library), so the scanner can compare fingerprints without a query per file.
+pub fn fingerprint_map(conn: &Connection, root_id: Option<i64>) -> AppResult<HashMap<String, (i64, i64, i64, bool)>> {
     let sql = match root_id {
-        Some(_) => "SELECT path, id, size_bytes, mtime FROM tracks WHERE root_id = ?1",
-        None => "SELECT path, id, size_bytes, mtime FROM tracks",
+        Some(_) => {
+            "SELECT path, id, size_bytes, mtime, duration_ms IS NULL FROM tracks WHERE root_id = ?1"
+        }
+        None => "SELECT path, id, size_bytes, mtime, duration_ms IS NULL FROM tracks",
     };
     let mut stmt = conn.prepare(sql)?;
     let rows = match root_id {
@@ -1010,13 +1012,34 @@ pub fn fingerprint_map(conn: &Connection, root_id: Option<i64>) -> AppResult<Has
     }?;
     let mut map = HashMap::new();
     for row in rows.flatten() {
-        map.insert(row.0.to_lowercase(), (row.1, row.2, row.3));
+        map.insert(row.0.to_lowercase(), (row.1, row.2, row.3, row.4));
     }
     Ok(map)
 }
 
-fn map_fingerprint(r: &rusqlite::Row) -> rusqlite::Result<(String, i64, i64, i64)> {
-    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+fn map_fingerprint(r: &rusqlite::Row) -> rusqlite::Result<(String, i64, i64, i64, bool)> {
+    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+}
+
+/// Fills the technical columns of a row that is otherwise up to date. Used when
+/// a scan finds an unchanged file whose metadata was never readable.
+pub fn update_meta(conn: &Connection, id: i64, m: &crate::probe::Meta) -> AppResult<()> {
+    conn.prepare(
+        r#"UPDATE tracks SET duration_ms=?2, sample_rate=?3, bit_depth=?4, channels=?5,
+                 bitrate=?6, codec=?7, container=?8
+           WHERE id=?1"#,
+    )?
+    .execute(params![
+        id,
+        m.duration_ms,
+        m.sample_rate,
+        m.bit_depth,
+        m.channels,
+        m.bitrate,
+        m.codec,
+        m.container
+    ])?;
+    Ok(())
 }
 
 pub fn delete_track(conn: &Connection, id: i64) -> AppResult<()> {

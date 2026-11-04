@@ -78,6 +78,10 @@
     detail: null,
     loadedAll: false,
     scanning: false,
+    progress: null,
+    scanSummary: null,
+    stopping: false,
+    lastPhase: "",
     colsOff: JSON.parse(localStorage.getItem("cols") || "[]"),
     filter: newFilter(),
     triage: { on: false, i: 0 },
@@ -114,6 +118,12 @@
     btnSettingsClose: $("btn-settings-close"),
     dlgConfirm: $("dlg-confirm"),
     confirmText: $("confirm-text"),
+    dlgUpdate: $("dlg-update"),
+    updateTitle: $("update-title"),
+    updateMeta: $("update-meta"),
+    updateNotes: $("update-notes"),
+    updateLater: $("update-later"),
+    updateGo: $("update-go"),
   };
 
   const visibleCols = () => COLS.filter((c) => !S.colsOff.includes(c.key) || c.fixed);
@@ -1481,7 +1491,93 @@
     );
   }
 
+  // The modal settings sheet covers the status bar, so a scan started from this
+  // pane publishes its own progress here.
+  function importCard() {
+    const card = el("div", "import-card");
+    card.id = "import-prog";
+    card.hidden = true;
+
+    const top = el("div", "import-top");
+    const phase = el("span", "import-phase");
+    const count = el("span", "import-count");
+    top.append(phase, count);
+
+    const track = el("div", "import-track");
+    const bar = el("div", "import-bar");
+    track.appendChild(bar);
+
+    const bottom = el("div", "import-bottom");
+    const file = el("span", "import-file");
+    const right = el("span", "import-right");
+    const pct = el("span", "import-pct");
+    const action = el("button", "btn subtle");
+    action.type = "button";
+    action.addEventListener("click", () => {
+      if (S.progress) {
+        S.stopping = true;
+        api.abortScan();
+        paintImportCard();
+      } else {
+        S.scanSummary = null;
+        paintImportCard();
+      }
+    });
+    right.append(pct, action);
+    bottom.append(file, right);
+
+    card.append(top, track, bottom);
+    card.parts = { phase, count, bar, file, pct, action };
+    return card;
+  }
+
+  function paintImportCard() {
+    const card = document.getElementById("import-prog");
+    if (!card) return;
+    const { phase, count, bar, file, pct, action } = card.parts;
+    const p = S.progress;
+
+    if (p) {
+      const known = p.total > 0;
+      const ratio = known ? Math.min(1, p.done / p.total) : 0;
+      card.hidden = false;
+      card.classList.remove("done");
+      card.classList.toggle("indeterminate", !known);
+      phase.textContent = p.phase || "扫描";
+      count.textContent = known ? `${F.num(p.done)} / ${F.num(p.total)}` : `${F.num(p.done)} 个`;
+      bar.style.width = known ? `${(ratio * 100).toFixed(1)}%` : "";
+      pct.textContent = known ? `${Math.floor(ratio * 100)}%` : "";
+      file.textContent = p.current || "";
+      action.textContent = S.stopping ? "正在停止…" : "取消";
+      action.disabled = S.stopping;
+      return;
+    }
+
+    const sum = S.scanSummary;
+    if (!sum || Date.now() - sum.at > 120000) {
+      card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+    card.classList.remove("indeterminate");
+    card.classList.add("done");
+    phase.textContent = sum.stopped
+      ? "扫描已停止"
+      : sum.phase === "重建波形"
+        ? "波形重建完成"
+        : "导入完成";
+    count.textContent = `新增 ${F.num(sum.added)} · 更新 ${F.num(sum.updated)}`;
+    bar.style.width = sum.stopped ? "" : "100%";
+    pct.textContent = "";
+    file.textContent = sum.removed || sum.errors
+      ? `移除 ${F.num(sum.removed)} · 失败 ${F.num(sum.errors)} · 用时 ${sum.seconds.toFixed(1)} 秒`
+      : `用时 ${sum.seconds.toFixed(1)} 秒`;
+    action.textContent = "关闭";
+    action.disabled = false;
+  }
+
   function paneScan() {
+    dom.settingsBody.appendChild(importCard());
     const scan = setGroup("导入与扫描", "folderAdd");
     scan.appendChild(
       setSwitch("生成波形峰值", "关闭后导入更快，但不显示波形且无法用峰值筛选", S.settings.genPeaks !== false, async (on) => {
@@ -1525,6 +1621,7 @@
     host.id = "roots-host";
     src.appendChild(host);
     renderRoots();
+    paintImportCard();
   }
 
   function paneData() {
@@ -1599,6 +1696,7 @@
         release = r;
         note.textContent = r.newer ? `发现新版本 ${r.version}` : `已是最新版本（${r.version}）`;
         go.hidden = !r.newer;
+        if (r.newer) showUpdateDialog(r, false);
       } catch (err) {
         note.textContent = `检查失败：${err}`;
       } finally {
@@ -1782,6 +1880,35 @@
     });
   }
 
+  // The launch check remembers the version it told the user about, so a
+  // dismissed prompt stays dismissed until the next release. A manual check
+  // from the settings always shows the dialog.
+  function showUpdateDialog(r, onlyOnce) {
+    if (!r || !r.newer || !dom.dlgUpdate || dom.dlgUpdate.open) return;
+    if (onlyOnce && localStorage.getItem("updSeen") === r.version) return;
+    dom.dlgUpdate.dataset.version = r.version;
+    dom.dlgUpdate.dataset.url = r.url || "";
+    dom.updateTitle.textContent = `发现新版本 ${r.version}`;
+    dom.updateMeta.textContent = `当前版本 ${S.appInfo ? S.appInfo.version : ""}`;
+    // Release notes are authored in Markdown; headings lose their hashes so
+    // the plain-text rendering does not look like source.
+    dom.updateNotes.textContent = (r.notes || "").replace(/^#{1,6}\s*/gm, "").trim();
+    dom.updateNotes.hidden = !dom.updateNotes.textContent;
+    dom.dlgUpdate.showModal();
+    // Otherwise the scrollable notes take focus and paint a focus ring.
+    dom.updateGo.focus();
+  }
+
+  dom.dlgUpdate.addEventListener("close", () => {
+    if (dom.dlgUpdate.dataset.version) localStorage.setItem("updSeen", dom.dlgUpdate.dataset.version);
+  });
+  dom.updateLater.addEventListener("click", () => dom.dlgUpdate.close());
+  dom.updateGo.addEventListener("click", () => {
+    const url = dom.dlgUpdate.dataset.url;
+    dom.dlgUpdate.close();
+    if (url) api.openLink(url).catch(() => flash("无法打开浏览器", "err"));
+  });
+
   /* ------------------------------------------------------------ status bar */
   function renderStatus() {
     const parts = [`${F.num(S.total)} 项`];
@@ -1798,15 +1925,23 @@
 
   function setProgress(p) {
     if (!p || !p.active) {
+      S.progress = null;
       dom.progress.hidden = true;
+      dom.progress.classList.remove("indefinite");
       S.scanning = false;
+      paintImportCard();
       return;
     }
+    S.progress = p;
+    S.lastPhase = p.phase;
+    S.scanSummary = null;
     S.scanning = true;
     dom.progress.hidden = false;
     const pct = p.total > 0 ? Math.min(100, (p.done / p.total) * 100) : 0;
     dom.progressBar.style.width = `${pct.toFixed(1)}%`;
+    dom.progress.classList.toggle("indefinite", !(p.total > 0));
     dom.progressText.textContent = `${p.phase} ${F.num(p.done)}${p.total ? "/" + F.num(p.total) : ""}`;
+    paintImportCard();
   }
 
   function flash(msg, kind) {
@@ -2296,9 +2431,21 @@
 
     T.event.listen("scan://progress", (e) => setProgress(e.payload));
     T.event.listen("scan://done", async (e) => {
+      const sum = e.payload || {};
+      S.scanSummary = {
+        phase: S.lastPhase,
+        stopped: S.stopping,
+        added: sum.added || 0,
+        updated: sum.updated || 0,
+        removed: sum.removed || 0,
+        errors: sum.errors || 0,
+        seconds: sum.seconds || 0,
+        at: Date.now(),
+      };
+      S.stopping = false;
       setProgress({ active: false });
       await refreshAll();
-      if (e.payload && e.payload.errors) dom.statusCount.title = `${e.payload.errors} 个文件读取失败`;
+      if (sum.errors) dom.statusCount.title = `${sum.errors} 个文件读取失败`;
     });
 
     if (T.core.invoke === undefined) dom.statusCount.textContent = "未连接到后端";
@@ -2308,7 +2455,7 @@
     if (S.settings.autoUpdate !== false) {
       api
         .checkUpdate()
-        .then((r) => r.newer && flash(`sfxer ${r.version} 已发布 · 设置 → 更新`))
+        .then((r) => showUpdateDialog(r, true))
         .catch(() => {});
     }
 

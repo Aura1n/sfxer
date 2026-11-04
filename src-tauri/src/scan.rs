@@ -12,11 +12,13 @@ use crate::db::{self, NewTrack, SharedDb};
 use crate::model::{ScanProgress, ScanSummary, Settings};
 use crate::probe;
 
-/// Everything we can at least identify and index. Formats outside symphonia's
-/// reach (WMA) still land in the library; they simply carry no waveform.
+/// Everything we can at least identify and index. Formats outside the decoders'
+/// reach still land in the library; they simply carry no waveform.
 pub const AUDIO_EXTS: &[&str] = &[
-    "mp3", "mp2", "mp1", "wav", "wave", "bwf", "flac", "ogg", "oga", "opus", "m4a", "m4b", "mp4", "aac", "aif",
-    "aiff", "caf", "wma", "ape", "mpc", "wv", "mka", "mkv", "dsf", "3gp", "amr", "ac3", "eac3", "aob",
+    "mp1", "mp2", "mp3", "mpga", "wav", "wave", "bwf", "w64", "rf64", "bw64", "flac", "ogg", "oga",
+    "opus", "spx", "m4a", "m4b", "m4p", "m4r", "mp4", "aac", "adts", "aif", "aiff", "aifc", "au",
+    "snd", "caf", "wma", "ape", "mpc", "wv", "tta", "tak", "mka", "mkv", "webm", "dsf", "dff",
+    "3gp", "amr", "ac3", "eac3", "dts", "aob",
 ];
 
 pub fn is_audio_name(name: &str) -> bool {
@@ -50,13 +52,17 @@ fn skip_dir(entry: &Path, allow_hidden: bool) -> bool {
     false
 }
 
-fn collect(root: &Path, settings: &Settings) -> Vec<PathBuf> {
+fn collect(root: &Path, settings: &Settings, control: &ScanControl, app: &AppHandle) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    let mut last_emit = Instant::now();
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| !(e.file_type().is_dir() && skip_dir(e.path(), settings.scan_hidden)))
     {
+        if control.abort.load(Ordering::Relaxed) {
+            break;
+        }
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_file() {
             continue;
@@ -65,6 +71,10 @@ fn collect(root: &Path, settings: &Settings) -> Vec<PathBuf> {
             continue;
         }
         out.push(entry.path().to_path_buf());
+        if out.len() % 200 == 0 && last_emit.elapsed() >= Duration::from_millis(160) {
+            last_emit = Instant::now();
+            emit(app, "查找文件", out.len() as i64, 0, &entry.file_name().to_string_lossy());
+        }
     }
     out
 }
@@ -97,11 +107,12 @@ struct ProbeMsg {
 
 enum ProbeResult {
     Track { track: NewTrack, existed: bool },
+    Meta { id: i64, meta: probe::Meta },
     Skip,
     Error,
 }
 
-type Fingerprints = HashMap<String, (i64, i64, i64)>;
+type Fingerprints = HashMap<String, (i64, i64, i64, bool)>;
 
 /// Pure per-file work: stat, compare with the library, probe, decode. Runs on
 /// several threads at once, so it never touches the database.
@@ -123,16 +134,29 @@ fn probe_file(
     let mtime = mtime_secs(&meta);
     let existing = indexed.get(&db_path.to_lowercase());
 
-    if let Some((_, old_size, old_mtime)) = existing {
+    if let Some((id, old_size, old_mtime, needs_meta)) = existing {
         if !force && *old_size == meta.len() as i64 && *old_mtime == mtime {
-            return ProbeMsg { path: db_path, skipped: true, result: ProbeResult::Skip };
+            if !*needs_meta {
+                return ProbeMsg { path: db_path, skipped: true, result: ProbeResult::Skip };
+            }
+            // The file itself is unchanged, but an older build could not read
+            // its properties. Repair those without decoding the audio again.
+            return match probe::read_meta(path) {
+                Ok(meta) if meta.duration_ms.is_some() || meta.sample_rate.is_some() => {
+                    ProbeMsg {
+                        path: db_path,
+                        skipped: true,
+                        result: ProbeResult::Meta { id: *id, meta },
+                    }
+                }
+                _ => ProbeMsg { path: db_path, skipped: true, result: ProbeResult::Skip },
+            };
         }
     }
 
-    let meta_info = match probe::read_meta(path) {
-        Ok(m) => m,
-        Err(_) => return ProbeMsg { path: db_path, skipped: false, result: ProbeResult::Error },
-    };
+    // A file we cannot describe is still a file the user owns: it enters the
+    // library with blank metadata rather than vanishing from the results.
+    let meta_info = probe::read_meta(path).ok();
     let wave = if settings.gen_peaks { probe::read_wave(path, buckets).ok() } else { None };
     let (name, ext, dir) = split_path(&db_path);
 
@@ -144,13 +168,13 @@ fn probe_file(
         root_id: Some(root_id),
         size_bytes: meta.len() as i64,
         mtime,
-        duration_ms: meta_info.duration_ms,
-        sample_rate: meta_info.sample_rate,
-        bit_depth: meta_info.bit_depth,
-        channels: meta_info.channels,
-        bitrate: meta_info.bitrate,
-        codec: meta_info.codec,
-        container: meta_info.container,
+        duration_ms: meta_info.as_ref().and_then(|m| m.duration_ms),
+        sample_rate: meta_info.as_ref().and_then(|m| m.sample_rate),
+        bit_depth: meta_info.as_ref().and_then(|m| m.bit_depth),
+        channels: meta_info.as_ref().and_then(|m| m.channels),
+        bitrate: meta_info.as_ref().and_then(|m| m.bitrate),
+        codec: meta_info.as_ref().and_then(|m| m.codec.clone()),
+        container: meta_info.as_ref().and_then(|m| m.container.clone()),
         peak_db: wave.as_ref().map(|w| w.peak_db),
         rms_db: wave.as_ref().map(|w| w.rms_db),
         decodeable: wave.is_some(),
@@ -173,8 +197,13 @@ fn worker_count() -> usize {
 
 const WRITE_BATCH: usize = 256;
 
-fn flush_batch(db: &SharedDb, batch: &mut Vec<NewTrack>, force: bool) {
-    if batch.is_empty() {
+fn flush_batch(
+    db: &SharedDb,
+    batch: &mut Vec<NewTrack>,
+    meta_batch: &mut Vec<(i64, probe::Meta)>,
+    force: bool,
+) {
+    if batch.is_empty() && meta_batch.is_empty() {
         return;
     }
     if let Ok(conn) = db.lock() {
@@ -185,16 +214,23 @@ fn flush_batch(db: &SharedDb, batch: &mut Vec<NewTrack>, force: bool) {
                 for t in batch.iter() {
                     let _ = db::upsert_track(&tx, t, force);
                 }
+                for (id, meta) in meta_batch.iter() {
+                    let _ = db::update_meta(&tx, *id, meta);
+                }
                 let _ = tx.commit();
             }
             Err(_) => {
                 for t in batch.iter() {
                     let _ = db::upsert_track(&conn, t, force);
                 }
+                for (id, meta) in meta_batch.iter() {
+                    let _ = db::update_meta(&conn, *id, meta);
+                }
             }
         }
     }
     batch.clear();
+    meta_batch.clear();
 }
 
 /// Walks each root, probing only what changed. Runs on its own thread; `app`
@@ -220,11 +256,17 @@ pub fn run(
         }
         let _ = app.emit(
             "scan://progress",
-            ScanProgress { active: true, phase: "列举文件".into(), done: 0, total: 0, current: root_path.display().to_string() },
+            ScanProgress { active: true, phase: "查找文件".into(), done: 0, total: 0, current: root_path.display().to_string() },
         );
 
-        let candidates = collect(root_path, &settings);
+        let candidates = collect(root_path, &settings, &control, &app);
+        if control.abort.load(Ordering::SeqCst) {
+            break;
+        }
         let total = candidates.len() as i64;
+        // Shows "0 / N" right away instead of waiting for the first file to
+        // finish probing, which can take a moment on a cold disk.
+        emit(&app, "解析", 0, total, "");
 
         // `fingerprints` is this root's own rows and drives the pruning below;
         // `indexed` covers the whole library, because a file that an overlapping
@@ -271,13 +313,19 @@ pub fn run(
             drop(tx);
 
             let mut batch: Vec<NewTrack> = Vec::with_capacity(WRITE_BATCH);
+            let mut meta_batch: Vec<(i64, probe::Meta)> = Vec::new();
             let mut phase = "解析";
             let mut current = String::new();
+            // `summary.scanned` accumulates across roots; the bar needs the
+            // count for this root only.
+            let mut root_scanned = 0i64;
+            let mut last_emit = Instant::now();
 
             loop {
                 match rx.recv_timeout(Duration::from_millis(220)) {
                     Ok(msg) => {
                         summary.scanned += 1;
+                        root_scanned += 1;
                         current = msg.path;
                         phase = if msg.skipped { "检查" } else { "解析" };
                         match msg.result {
@@ -289,30 +337,42 @@ pub fn run(
                                 }
                                 batch.push(track);
                                 if batch.len() >= WRITE_BATCH {
-                                    flush_batch(&db, &mut batch, force);
+                                    flush_batch(&db, &mut batch, &mut meta_batch, force);
                                 }
+                            }
+                            ProbeResult::Meta { id, meta } => {
+                                summary.updated += 1;
+                                meta_batch.push((id, meta));
                             }
                             ProbeResult::Skip => {}
                             ProbeResult::Error => summary.errors += 1,
+                        }
+                        // Emitting only after a lull would freeze the bar while
+                        // small files stream in non-stop, so pace it by time.
+                        if last_emit.elapsed() >= Duration::from_millis(160) {
+                            flush_batch(&db, &mut batch, &mut meta_batch, force);
+                            emit(&app, phase, root_scanned, total, &current);
+                            last_emit = Instant::now();
                         }
                     }
                     // A long file can take longer than the emit interval, so the
                     // timeout also keeps the progress line moving.
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        flush_batch(&db, &mut batch, force);
-                        emit(&app, phase, summary.scanned, total, &current);
+                        flush_batch(&db, &mut batch, &mut meta_batch, force);
+                        emit(&app, phase, root_scanned, total, &current);
+                        last_emit = Instant::now();
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
-            flush_batch(&db, &mut batch, force);
+            flush_batch(&db, &mut batch, &mut meta_batch, force);
         });
 
         // Anything recorded under this root that the walk did not see and that
         // no longer exists on disk leaves the library.
         if !control.abort.load(Ordering::SeqCst) {
             if let Ok(conn) = db.lock() {
-                for (path, (id, _, _)) in &fingerprints {
+                for (path, (id, _, _, _)) in &fingerprints {
                     if !seen.contains(&path.to_lowercase()) && !Path::new(path).exists() {
                         if db::delete_track(&conn, *id).is_ok() {
                             summary.removed += 1;

@@ -1634,6 +1634,13 @@ html[data-theme="dark"] .flyout .check.on {
   transition: width 0.12s linear;
 }
 
+/* During file collection there is no total yet, so the bar sweeps instead of
+   sitting at zero. */
+.progress.indefinite .progress-bar {
+  width: 35% !important;
+  animation: progress-slide 1.1s ease-in-out infinite;
+}
+
 /* ---------- dialogs ---------- */
 dialog.dlg {
   width: min(560px, 92vw);
@@ -1693,6 +1700,38 @@ dialog.dlg::backdrop {
   justify-content: flex-end;
   gap: 8px;
   padding: 12px 16px;
+}
+
+/* Update prompt: one version line plus the release notes, which arrive as
+   plain text and may run long, so they scroll instead of stretching the box. */
+.update-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-head svg {
+  width: 17px;
+  height: 17px;
+  color: var(--accent);
+}
+
+.update-head h2 {
+  font: 600 14px var(--font-display);
+}
+
+.update-meta {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.update-notes {
+  max-height: 232px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-2);
 }
 
 /* Settings opens as a page: a left rail picks the section and the right side
@@ -1840,6 +1879,90 @@ dialog.dlg:not([open]) {
 
 .set-row code.path {
   margin-top: 3px;
+}
+
+/* ---------- import progress ---------- */
+/* Lives inside the settings sheet because the status-bar bar is hidden behind
+   the modal while a folder is being added. */
+.import-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg-layer);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-card);
+}
+
+.import-top,
+.import-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.import-phase {
+  font: 600 12.5px var(--font-display);
+  color: var(--text-1);
+}
+
+.import-count,
+.import-pct {
+  font: 400 11.5px var(--font-mono);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.import-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--stroke);
+  overflow: hidden;
+}
+
+.import-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.15s linear;
+}
+
+.import-card.indeterminate .import-bar {
+  width: 35%;
+  animation: progress-slide 1.1s ease-in-out infinite;
+}
+
+.import-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font: 400 11.5px var(--font-mono);
+}
+
+.import-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.import-card .btn {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+@keyframes progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(320%);
+  }
 }
 
 .ctl-row {

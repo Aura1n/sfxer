@@ -21,6 +21,7 @@ walkdir = "2"
 rusqlite = { version = "0.41", default-features = false, features = ["bundled", "chrono"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 lofty = "0.25"
+ape-decoder = "0.3"
 symphonia = { version = "0.6", default-features = false, features = ["all-codecs", "all-formats", "all-meta", "opt-simd"] }
 symphonia-adapter-opus-rs = "0.1"
 rodio = { version = "0.23", default-features = false, features = ["playback", "flac", "mp3", "wav", "vorbis", "mp4"] }
