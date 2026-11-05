@@ -769,6 +769,64 @@ html[data-theme="dark"] .row .play:hover {
   color: var(--text-3);
 }
 
+/* Multi-select column: the box stays visible so a batch can be built without
+   discovering the modifier keys first. */
+.sel-check {
+  width: 16px;
+  height: 16px;
+  justify-self: center;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--stroke-strong);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: #fff;
+}
+
+.sel-check svg {
+  width: 11px;
+  height: 11px;
+  opacity: 0;
+}
+
+.row:hover .sel-check {
+  border-color: var(--text-2);
+}
+
+.head-check {
+  cursor: pointer;
+}
+
+.head-check:hover {
+  border-color: var(--text-1);
+}
+
+.sel-check.on,
+.sel-check.part {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.sel-check.on svg {
+  opacity: 1;
+}
+
+.sel-check.part::after {
+  content: "";
+  width: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: #fff;
+}
+
+html[data-theme="dark"] .sel-check {
+  color: #00131f;
+}
+
+html[data-theme="dark"] .sel-check.part::after {
+  background: #00131f;
+}
+
 /* The ⋯ button is the mouse-only door into the same menu the right click opens. */
 .row .row-act {
   width: 22px;
@@ -1391,6 +1449,16 @@ html[data-theme="dark"] .btn.accent {
 
 .btn.accent:hover {
   background: var(--accent-hover);
+}
+
+.btn.danger {
+  background: var(--danger);
+  border-color: transparent;
+  color: #fff;
+}
+
+#confirm-text {
+  white-space: pre-line;
 }
 
 .btn .ico svg {

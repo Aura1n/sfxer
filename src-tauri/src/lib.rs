@@ -72,6 +72,7 @@ pub fn run() {
             commands::update_tags,
             commands::set_rating,
             commands::remove_tracks,
+            commands::delete_files,
             commands::reveal,
             commands::open_db_folder,
             commands::copy_paths,

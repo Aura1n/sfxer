@@ -11,6 +11,7 @@
   // The two stretchable columns keep small minima so the fixed metadata columns
   // never push the ⋯ cell past the pane edge on a narrow window.
   const COLS = [
+    { key: "sel", w: "28px", fixed: true },
     { key: "play", w: "24px", fixed: true },
     { key: "name", label: "名称", w: "minmax(100px, 1.3fr)", sort: "name" },
     { key: "dur", label: "时长", w: "58px", sort: "duration", align: "right" },
@@ -144,7 +145,8 @@
       if (c.fixed) {
         // The trailing ⋯ cell doubles as the "restore hidden columns" button,
         // so the header keeps exactly one child per grid column.
-        if (c.key === "act" && S.colsOff.length) dom.colsHead.appendChild(restoreBtn());
+        if (c.key === "sel") dom.colsHead.appendChild(headCheck());
+        else if (c.key === "act" && S.colsOff.length) dom.colsHead.appendChild(restoreBtn());
         else dom.colsHead.appendChild(el("span"));
         continue;
       }
@@ -180,6 +182,36 @@
     }
   }
 
+  function headCheck() {
+    const b = el("span", "sel-check head-check");
+    b.tabIndex = 0;
+    b.setAttribute("role", "checkbox");
+    b.innerHTML = icon("check");
+    const toggleAll = () => {
+      const all = S.rows.length > 0 && S.rows.every((r) => S.sel.has(r.id));
+      setSelection(all ? [] : S.rows.map((r) => r.id), S.cursor);
+    };
+    b.addEventListener("click", toggleAll);
+    b.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      toggleAll();
+    });
+    return b;
+  }
+
+  function updateHeadCheck() {
+    const b = dom.colsHead.querySelector(".head-check");
+    if (!b) return;
+    let picked = 0;
+    for (const r of S.rows) if (S.sel.has(r.id)) picked++;
+    const all = picked > 0 && picked === S.rows.length;
+    b.classList.toggle("on", all);
+    b.classList.toggle("part", picked > 0 && !all);
+    b.setAttribute("aria-checked", all ? "true" : picked ? "mixed" : "false");
+    b.title = all ? "取消全选" : "全选当前列表";
+  }
+
   function restoreBtn() {
     const restore = el("button", "col-restore");
     restore.type = "button";
@@ -210,6 +242,16 @@
     const cells = [];
     for (const c of visibleCols()) {
       switch (c.key) {
+        case "sel": {
+          const on = S.sel.has(r.id);
+          const b = el("span", "sel-check" + (on ? " on" : ""));
+          b.innerHTML = icon("check");
+          b.setAttribute("role", "checkbox");
+          b.setAttribute("aria-checked", on ? "true" : "false");
+          b.title = "选择（Shift 连选，Ctrl 切换）";
+          cells.push(b);
+          break;
+        }
         case "play": {
           const b = el("span", "play" + (r.decodeable ? "" : " no-decode"));
           b.innerHTML = r.decodeable ? icon("playFill") : icon("broken");
@@ -298,6 +340,7 @@
     }
     dom.rowsVirtual.textContent = "";
     dom.rowsVirtual.appendChild(frag);
+    updateHeadCheck();
 
     if (!S.rows.length) {
       dom.listEmpty.hidden = false;
@@ -1266,6 +1309,13 @@
       })
     );
     rmSec.appendChild(rm);
+
+    const delSec = section("删除文件", "remove");
+    const del = el("button", "btn subtle");
+    del.style.color = "var(--danger)";
+    del.innerHTML = icon("remove") + `<span>删除选中的 ${ids.length} 个文件</span>`;
+    del.addEventListener("click", () => deleteFiles(ids));
+    delSec.appendChild(del);
   }
 
   function noteFlash(sec, text) {
@@ -1848,8 +1898,13 @@
 
   let confirmResolve = null;
 
-  function confirm(text) {
+  function confirm(text, opts) {
+    const ok = $("confirm-ok");
+    const danger = !!(opts && opts.danger);
     dom.confirmText.textContent = text;
+    ok.classList.toggle("accent", !danger);
+    ok.classList.toggle("danger", danger);
+    ok.textContent = (opts && opts.okLabel) || "确定";
     dom.dlgConfirm.showModal();
     return new Promise((res) => (confirmResolve = res));
   }
@@ -2085,6 +2140,23 @@
       if (!rowEl) return;
       const index = parseInt(rowEl.dataset.index, 10);
       const r = S.rows[index];
+      if (e.target.closest(".sel-check")) {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        if (e.shiftKey && S.anchor >= 0) {
+          const [a, b] = [Math.min(S.anchor, index), Math.max(S.anchor, index)];
+          for (let i = a; i <= b; i++) S.sel.add(S.rows[i].id);
+          S.cursor = index;
+        } else {
+          if (S.sel.has(r.id)) S.sel.delete(r.id);
+          else S.sel.add(r.id);
+          S.anchor = index;
+          S.cursor = index;
+        }
+        renderRows();
+        showDetail();
+        return;
+      }
       if (e.target.closest(".play")) {
         if (!r.decodeable) return;
         if (!S.sel.has(r.id)) setSelection([r.id], index);
@@ -2139,6 +2211,26 @@
     clampPanes();
   }
 
+  async function deleteFiles(ids) {
+    const one = ids.length === 1;
+    const ok = await confirm(
+      `将 ${ids.length} 个文件移到回收站？\n${one ? "它" : "它们"}会从库中移除，需要时可在系统回收站还原。`,
+      { danger: true, okLabel: "移到回收站" }
+    );
+    if (!ok) return;
+    try {
+      const r = await api.deleteFiles(ids);
+      const current = window.PlayerView.currentTrack();
+      if (current && ids.includes(current.id)) window.PlayerView.stop();
+      ids.forEach((i) => S.sel.delete(i));
+      await refreshAll();
+      if (r.failed.length) flash(`已删除 ${r.deleted} 个文件，${r.failed.length} 个失败：${r.failed[0]}`, "err");
+      else flash(`已删除 ${r.deleted} 个文件`);
+    } catch (e) {
+      flash(`删除失败：${e}`, "err");
+    }
+  }
+
   function rowContextMenu(x, y) {
     const box = el("div", "flyout");
     const ids = [...S.sel];
@@ -2182,13 +2274,14 @@
     if (ids.length === 1 && first) mi("复制文件名", "edit", () => navigator.clipboard.writeText(first.alias || first.name));
     mi("复制路径", "copy", () => api.copyPaths(ids));
     if (ids.length === 1) mi("在文件夹中定位", "folderOpen", () => api.reveal(ids[0]));
-    mi("移出库", "remove", () => confirm(`从库中移除 ${ids.length} 个条目？文件保留在磁盘。`).then(async (ok) => {
+    mi("移出库", "export", () => confirm(`从库中移除 ${ids.length} 个条目？文件保留在磁盘。`).then(async (ok) => {
       if (ok) {
         await api.removeTracks(ids);
         ids.forEach((i) => S.sel.delete(i));
         await refreshAll();
       }
     }), { danger: true });
+    mi(ids.length > 1 ? `删除 ${ids.length} 个文件…` : "删除文件…", "remove", () => deleteFiles(ids), { danger: true });
 
     placeFixedMenu(box, x, y, y);
     const onDoc = (e) => {

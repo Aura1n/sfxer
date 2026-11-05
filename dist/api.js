@@ -23,6 +23,7 @@
     updateTags: (ids, add, remove) => invoke("update_tags", { ids, add: add || [], remove: remove || [] }),
     setRating: (ids, rating) => invoke("set_rating", { ids, rating }),
     removeTracks: (ids) => invoke("remove_tracks", { ids }),
+    deleteFiles: (ids) => invoke("delete_files", { ids }),
     reveal: (id) => invoke("reveal", { id }),
     rebuildPeaks: () => invoke("rebuild_peaks", {}),
 

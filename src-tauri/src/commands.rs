@@ -202,6 +202,50 @@ pub fn remove_tracks(state: State<AppState>, ids: Vec<i64>) -> Cmd<usize> {
     db::remove_tracks(&conn(&state.db), &ids).map_err(fail)
 }
 
+#[derive(serde::Serialize)]
+pub struct DeleteReport {
+    pub deleted: usize,
+    pub failed: Vec<String>,
+}
+
+/// Sends the files themselves to the Recycle Bin and then drops their rows.
+/// Playback stops first so the decoder releases the file handle; a file that is
+/// already gone still counts, and failures leave their rows in place.
+#[tauri::command]
+pub fn delete_files(state: State<AppState>, ids: Vec<i64>) -> Cmd<DeleteReport> {
+    if let Some(current) = state.player.status().track_id {
+        if ids.contains(&current) {
+            state.player.stop();
+        }
+    }
+    let targets: Vec<(i64, PathBuf)> = {
+        let guard = conn(&state.db);
+        ids.iter()
+            .filter_map(|id| db::track_path(&guard, *id).ok().map(|p| (*id, PathBuf::from(p))))
+            .collect()
+    };
+    let mut deleted_ids = Vec::with_capacity(targets.len());
+    let mut failed = Vec::new();
+    for (id, path) in targets {
+        if !path.exists() {
+            deleted_ids.push(id);
+            continue;
+        }
+        match trash::delete(&path) {
+            Ok(()) => deleted_ids.push(id),
+            Err(e) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                failed.push(format!("{name}：{e}"));
+            }
+        }
+    }
+    db::remove_tracks(&conn(&state.db), &deleted_ids).map_err(fail)?;
+    Ok(DeleteReport { deleted: deleted_ids.len(), failed })
+}
+
 #[tauri::command]
 pub fn reveal(state: State<AppState>, id: i64) -> Cmd<()> {
     let path = db::track_path(&conn(&state.db), id).map_err(fail)?;

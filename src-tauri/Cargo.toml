@@ -26,6 +26,7 @@ symphonia = { version = "0.6", default-features = false, features = ["all-codecs
 symphonia-adapter-opus-rs = "0.1"
 rodio = { version = "0.23", default-features = false, features = ["playback", "flac", "mp3", "wav", "vorbis", "mp4"] }
 rfd = { version = "0.15", default-features = false }
+trash = "=5.2.9"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
