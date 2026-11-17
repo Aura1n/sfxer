@@ -25,6 +25,9 @@
   let volEl = null;
   let hintEl = null;
   let hooks = { onStep() {}, onEnd() {} };
+  // A duplicate audition borrows the shared player; when it drains it must not
+  // look like the armed track ended, or the queue would advance on its own.
+  let previewing = false;
 
   const st = {
     track: null,
@@ -156,6 +159,7 @@
   async function play(id) {
     const target = id || (st.track && st.track.id);
     if (!target) return null;
+    previewing = false;
     const r = await api.play(target, 0, st.mode === "one");
     if (r && r.error) hintEl.textContent = r.error;
     return r;
@@ -163,6 +167,7 @@
 
   function stop() {
     api.stop();
+    previewing = false;
     // Once playback has ended the poller stops ticking, so nothing would clear
     // the readout later — reset it here instead of waiting for a status frame.
     st.ratio = 0;
@@ -360,7 +365,7 @@
     }
     // The last frame of a finished track is the only one the poller sees, so the
     // queue has to move on here rather than on a timer of its own.
-    if (wasPlaying && sameTrack && !status.playing && !status.paused) hooks.onEnd();
+    if (wasPlaying && sameTrack && !status.playing && !status.paused && !previewing) hooks.onEnd();
     if (st.mode === "one" && status.loop === false) api.setLoop(true);
     paintGlyph();
     draw();
@@ -376,6 +381,9 @@
     stop,
     setMode,
     cycleMode,
+    setPreview: (on) => {
+      previewing = !!on;
+    },
     loopMode: () => st.mode,
     currentTrack: () => st.track,
     isPlaying: () => st.playing,

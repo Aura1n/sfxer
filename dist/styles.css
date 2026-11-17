@@ -239,6 +239,17 @@ svg {
   background: var(--accent-hover);
 }
 
+.cta .cta-caret {
+  display: inline-flex;
+  margin-left: -3px;
+  opacity: 0.85;
+}
+
+.cta .cta-caret svg {
+  width: 12px;
+  height: 12px;
+}
+
 html[data-theme="dark"] .cta {
   color: #00131f;
 }
@@ -2217,4 +2228,189 @@ html[data-theme="dark"] .switch.on::after {
 
 [data-col-hidden="1"] {
   display: none !important;
+}
+
+/* Drag & drop import target. pointer-events stays off so the native drop still
+   reaches the webview underneath. */
+#drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+}
+
+#drop-overlay[hidden] {
+  display: none;
+}
+
+#drop-overlay .drop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 30px 44px;
+  border: 2px dashed var(--accent);
+  border-radius: 14px;
+  background: var(--bg);
+  color: var(--text-1);
+  font-size: 14px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.18);
+}
+
+#drop-overlay .drop-card .ico,
+#drop-overlay .drop-card svg {
+  width: 30px;
+  height: 30px;
+  color: var(--accent);
+}
+
+/* Duplicate finder: grouped cards, one checkbox per copy. */
+dialog.dlg.dupes-dlg {
+  width: min(720px, 94vw);
+  height: min(600px, 84vh);
+  display: flex;
+  flex-direction: column;
+}
+
+.dupes-summary {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--stroke);
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.dupes-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dup-group {
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  flex: none;
+}
+
+.dup-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  background: var(--bg-hover);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dup-head .dup-meta {
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+.dup-ignore {
+  margin-left: auto;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.dup-ignore:hover {
+  background: var(--bg-card);
+  color: var(--text-1);
+}
+
+.dup-row {
+  display: grid;
+  grid-template-columns: 18px 22px minmax(0, 1.2fr) minmax(0, 1fr) 46px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 12px;
+  border-top: 1px solid var(--stroke);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dup-row:hover {
+  background: var(--bg-hover);
+}
+
+.dup-row.playing {
+  background: var(--accent-soft);
+}
+
+.dup-row input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.dup-play {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.dup-play svg {
+  width: 15px;
+  height: 15px;
+}
+
+.dup-play:hover {
+  background: var(--bg-card);
+  color: var(--text-1);
+}
+
+.dup-play.on {
+  color: var(--accent);
+}
+
+.dup-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dup-dir {
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dup-dur {
+  text-align: right;
+  color: var(--text-2);
+}
+
+.dupes-foot {
+  align-items: center;
+  border-top: 1px solid var(--stroke);
+}
+
+#dupes-selinfo {
+  color: var(--text-2);
+  font-size: 12px;
 }

@@ -2,10 +2,10 @@
 //! this file only translates between the two sides and owns the threads.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::Connection;
 use serde_json::Value;
@@ -32,6 +32,26 @@ pub struct AppState {
     pub db: SharedDb,
     pub player: Arc<PlayerCtl>,
     pub scan: ScanControl,
+    pub undo: Mutex<Vec<UndoEntry>>,
+}
+
+/// One reversible user action. Kept in memory only: undo history starts fresh
+/// each launch, and the cap keeps a mass delete from pinning the whole library.
+pub enum UndoEntry {
+    Fields { label: String, snaps: Vec<TrackSnap> },
+    Removed { label: String, rows: Vec<db::RemovedTrack> },
+    Files { label: String, rows: Vec<db::RemovedTrack> },
+    IgnoredDup { sig: String },
+}
+
+const UNDO_CAP: usize = 30;
+
+fn push_undo(state: &AppState, entry: UndoEntry) {
+    let mut stack = state.undo.lock().unwrap_or_else(|p| p.into_inner());
+    stack.push(entry);
+    if stack.len() > UNDO_CAP {
+        stack.remove(0);
+    }
 }
 
 impl AppState {
@@ -39,7 +59,7 @@ impl AppState {
         let player = Arc::new(player);
         let volume = db::get_settings(&conn(&db)).map(|s| s.volume).unwrap_or(0.7);
         player.set_volume(volume);
-        Self { db, player, scan: ScanControl::default() }
+        Self { db, player, scan: ScanControl::default(), undo: Mutex::new(Vec::new()) }
     }
 }
 
@@ -64,9 +84,61 @@ fn spawn_scan(app: AppHandle, state: &AppState, root_id: Option<i64>, force: boo
     let control = state.scan.clone();
     std::thread::spawn(move || {
         let db = app.state::<AppState>().db.clone();
-        scan::run(db, app, targets, force, settings, control);
+        scan::run(db, app, targets, force, settings, control, Vec::new());
     });
     Ok(true)
+}
+
+#[derive(serde::Serialize)]
+pub struct DropReport {
+    pub files: usize,
+    pub folders: usize,
+    pub skipped: usize,
+    pub started: bool,
+}
+
+/// Drag & drop entry: folders become roots, loose audio files are probed on
+/// their own so dropping one file does not import its whole directory.
+#[tauri::command]
+pub fn import_paths(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> Cmd<DropReport> {
+    if state.scan.running.load(Ordering::SeqCst) {
+        return Err("正在导入，请稍候再试".into());
+    }
+    let mut files = Vec::new();
+    let mut folders = Vec::new();
+    let mut skipped = 0usize;
+    for p in &paths {
+        let pb = PathBuf::from(p);
+        if pb.is_dir() {
+            folders.push(p.clone());
+        } else if pb.is_file()
+            && scan::is_audio_name(&pb.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+        {
+            files.push(pb);
+        } else {
+            skipped += 1;
+        }
+    }
+    let mut targets = Vec::new();
+    {
+        let guard = conn(&state.db);
+        for f in &folders {
+            let root = db::add_root(&guard, f).map_err(fail)?;
+            targets.push((root.id, PathBuf::from(&root.path)));
+        }
+    }
+    let report = DropReport { files: files.len(), folders: folders.len(), skipped, started: false };
+    if files.is_empty() && targets.is_empty() {
+        return Ok(report);
+    }
+    let settings = db::get_settings(&conn(&state.db)).map_err(fail)?;
+    state.scan.running.store(true, Ordering::SeqCst);
+    let control = state.scan.clone();
+    let db_arc = state.db.clone();
+    std::thread::spawn(move || {
+        scan::run(db_arc, app, targets, false, settings, control, files);
+    });
+    Ok(DropReport { started: true, ..report })
 }
 
 /* ---------------------------------------------------------------- library */
@@ -79,6 +151,25 @@ pub async fn pick_root() -> Cmd<Option<String>> {
     .await
     .map_err(fail)?;
     Ok(picked.map(|p| p.to_string_lossy().to_string()))
+}
+
+/// Native multi-select picker for loose audio files. The files stay where they
+/// are on disk; only the library gains rows for them.
+#[tauri::command]
+pub async fn pick_audio_files() -> Cmd<Vec<String>> {
+    let picked = tauri::async_runtime::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .set_title("选择音频文件")
+            .add_filter("音频", scan::AUDIO_EXTS)
+            .pick_files()
+    })
+    .await
+    .map_err(fail)?;
+    Ok(picked
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect())
 }
 
 #[tauri::command]
@@ -139,6 +230,19 @@ pub fn stats(state: State<AppState>) -> Cmd<Stats> {
 }
 
 #[tauri::command]
+pub fn find_duplicates(state: State<AppState>) -> Cmd<Vec<DupGroup>> {
+    db::duplicates(&conn(&state.db)).map_err(fail)
+}
+
+/// Auditioning showed distinct takes, so stop reporting this group as copies.
+#[tauri::command]
+pub fn ignore_duplicates(state: State<AppState>, sig: String) -> Cmd<()> {
+    db::ignore_dup(&conn(&state.db), &sig).map_err(fail)?;
+    push_undo(&state, UndoEntry::IgnoredDup { sig });
+    Ok(())
+}
+
+#[tauri::command]
 pub fn rebuild_peaks(app: AppHandle, state: State<AppState>) -> Cmd<bool> {
     if state.scan.running.load(Ordering::SeqCst) {
         return Ok(false);
@@ -178,27 +282,37 @@ pub fn rows_flags(state: State<AppState>, ids: Vec<i64>) -> Cmd<HashMap<i64, Row
 
 #[tauri::command]
 pub fn set_alias(state: State<AppState>, id: i64, alias: String) -> Cmd<()> {
+    let snaps = db::snapshot_tracks(&conn(&state.db), &[id]).map_err(fail)?;
+    push_undo(&state, UndoEntry::Fields { label: "显示名".into(), snaps });
     db::set_alias(&conn(&state.db), id, &alias).map_err(fail)
 }
 
 #[tauri::command]
 pub fn set_notes(state: State<AppState>, ids: Vec<i64>, text: String, mode: String) -> Cmd<()> {
+    let snaps = db::snapshot_tracks(&conn(&state.db), &ids).map_err(fail)?;
+    push_undo(&state, UndoEntry::Fields { label: "备注".into(), snaps });
     db::set_notes(&conn(&state.db), &ids, &text, &mode).map_err(fail)
 }
 
 #[tauri::command]
 pub fn update_tags(state: State<AppState>, ids: Vec<i64>, add: Vec<i64>, remove: Vec<i64>) -> Cmd<usize> {
+    let snaps = db::snapshot_tracks(&conn(&state.db), &ids).map_err(fail)?;
+    push_undo(&state, UndoEntry::Fields { label: "标签".into(), snaps });
     db::update_track_tags(&conn(&state.db), &ids, &add, &remove).map_err(fail)
 }
 
 #[tauri::command]
 pub fn set_rating(state: State<AppState>, ids: Vec<i64>, rating: i64) -> Cmd<()> {
+    let snaps = db::snapshot_tracks(&conn(&state.db), &ids).map_err(fail)?;
+    push_undo(&state, UndoEntry::Fields { label: "评分".into(), snaps });
     db::set_rating(&conn(&state.db), &ids, rating).map_err(fail)
 }
 
 /// Drops library rows only; the audio files are never touched.
 #[tauri::command]
 pub fn remove_tracks(state: State<AppState>, ids: Vec<i64>) -> Cmd<usize> {
+    let rows = db::capture_tracks(&conn(&state.db), &ids).map_err(fail)?;
+    push_undo(&state, UndoEntry::Removed { label: "移出库".into(), rows });
     db::remove_tracks(&conn(&state.db), &ids).map_err(fail)
 }
 
@@ -242,22 +356,135 @@ pub fn delete_files(state: State<AppState>, ids: Vec<i64>) -> Cmd<DeleteReport> 
             }
         }
     }
+    let rows = db::capture_tracks(&conn(&state.db), &deleted_ids).map_err(fail)?;
+    if !rows.is_empty() {
+        push_undo(&state, UndoEntry::Files { label: "删除文件".into(), rows });
+    }
     db::remove_tracks(&conn(&state.db), &deleted_ids).map_err(fail)?;
     Ok(DeleteReport { deleted: deleted_ids.len(), failed })
+}
+
+/// The shell's restore verb is the only route back from the Recycle Bin. Verb
+/// names are localized, so match the common words and fall back to the first
+/// verb, which on Recycle Bin items is always Restore.
+fn restore_from_trash(paths: &[String]) -> Cmd<()> {
+    use std::os::windows::process::CommandExt;
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut script = String::from(
+        "$ErrorActionPreference = 'Stop'\n\
+         $shell = New-Object -ComObject Shell.Application\n\
+         $items = @($shell.Namespace(0xA).Items())\n\
+         $targets = @(\n",
+    );
+    for p in paths {
+        script.push_str(&format!("'{}'\n", p.replace('\'', "''")));
+    }
+    script.push_str(
+        ")\n\
+         foreach ($t in $targets) {\n\
+           if (Test-Path -LiteralPath $t) { continue }\n\
+           $dir = Split-Path -Parent $t\n\
+           $leaf = Split-Path -Leaf $t\n\
+           foreach ($item in $items) {\n\
+             if ($item.Name -eq $leaf -and $item.ExtendedProperty('System.Recycle.DeletedFrom') -eq $dir) {\n\
+               $verbs = @($item.Verbs())\n\
+               $pick = $null\n\
+               foreach ($v in $verbs) { if ($v.Name -match 'restore|还原|復元|복원|wiederherstellen|restaurer|restaurar|ripristina') { $pick = $v; break } }\n\
+               if (-not $pick -and $verbs.Count -gt 0) { $pick = $verbs[0] }\n\
+               if ($pick) { $pick.DoIt() }\n\
+               break\n\
+             }\n\
+           }\n\
+         }\n",
+    );
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(fail)?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    // DoIt returns before the move finishes; give the files a moment to land.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        if paths.iter().all(|p| std::path::Path::new(p).exists()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Ok(())
+}
+
+/// Reverses the newest journaled action. A file delete goes back through the
+/// Recycle Bin first; rows whose file did not return stay on the stack.
+#[tauri::command]
+pub fn undo(state: State<AppState>) -> Cmd<String> {
+    let entry = {
+        let mut stack = state.undo.lock().unwrap_or_else(|p| p.into_inner());
+        stack.pop()
+    };
+    let Some(entry) = entry else { return Err("没有可撤销的操作".into()) };
+    match entry {
+        UndoEntry::Fields { label, snaps } => {
+            let n = db::restore_snapshots(&conn(&state.db), &snaps).map_err(fail)?;
+            Ok(format!("{label}（{n} 个条目）"))
+        }
+        UndoEntry::Removed { label, rows } => {
+            let n = db::restore_tracks(&conn(&state.db), &rows).map_err(fail)?;
+            Ok(format!("{label}（{n} 个条目）"))
+        }
+        UndoEntry::Files { label, rows } => {
+            let paths: Vec<String> = rows.iter().map(|r| r.path.clone()).collect();
+            if let Err(e) = restore_from_trash(&paths) {
+                push_undo(&state, UndoEntry::Files { label, rows });
+                return Err(e);
+            }
+            let (back, pending): (Vec<_>, Vec<_>) =
+                rows.into_iter().partition(|r| std::path::Path::new(&r.path).exists());
+            let n = db::restore_tracks(&conn(&state.db), &back).map_err(fail)?;
+            if pending.is_empty() {
+                Ok(format!("{label}（{n} 个文件）"))
+            } else {
+                let left = pending.len();
+                push_undo(&state, UndoEntry::Files { label: label.clone(), rows: pending });
+                Ok(format!("{label}（还原 {n} 个文件，{left} 个未能还原）"))
+            }
+        }
+        UndoEntry::IgnoredDup { sig } => {
+            db::unignore_dup(&conn(&state.db), &sig).map_err(fail)?;
+            Ok("不是重复标记".into())
+        }
+    }
 }
 
 #[tauri::command]
 pub fn reveal(state: State<AppState>, id: i64) -> Cmd<()> {
     let path = db::track_path(&conn(&state.db), id).map_err(fail)?;
-    open_in_explorer(&format!("/select,{path}"));
-    Ok(())
+    let native = db::strip_verbatim(&path).replace('/', "\\");
+    let target = Path::new(&native);
+    if target.is_file() {
+        explorer_raw(&format!("/select,\"{native}\""));
+        return Ok(());
+    }
+    // The library can outlive a rename or move. Landing in the containing
+    // folder is still useful; landing in Documents is not.
+    match target.parent().filter(|p| p.is_dir()) {
+        Some(dir) => {
+            explorer_raw(&format!("\"{}\"", dir.to_string_lossy()));
+            Ok(())
+        }
+        None => Err("文件已不在原位置".into()),
+    }
 }
 
 #[tauri::command]
 pub fn open_db_folder(state: State<AppState>) -> Cmd<()> {
     let path = db::db_path_of(&conn(&state.db)).ok_or_else(|| "数据库路径未知".to_string())?;
     let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or(path);
-    open_in_explorer(&dir.to_string_lossy());
+    explorer_raw(&format!("\"{}\"", dir.to_string_lossy()));
     Ok(())
 }
 
@@ -275,9 +502,15 @@ pub fn copy_paths(state: State<AppState>, ids: Vec<i64>) -> Cmd<String> {
     Ok(out.join("\r\n"))
 }
 
-fn open_in_explorer(arg: &str) {
+/// Explorer parses its own command line rather than using the C runtime rules:
+/// `/select,<path>` only highlights the file when the path is quoted, otherwise
+/// it silently falls back to Documents or a drive root. `Command::arg` let the
+/// std quoting rules escape the switch as one token, so it went wrong for any
+/// path holding a space or comma — most of them, once folders have Chinese
+/// names. `raw_arg` hands Explorer the exact string it expects.
+fn explorer_raw(raw: &str) {
     use std::os::windows::process::CommandExt;
-    let _ = Command::new("explorer").creation_flags(0x08000000).arg(arg).spawn();
+    let _ = Command::new("explorer").creation_flags(0x08000000).raw_arg(raw).spawn();
 }
 
 /* ------------------------------------------------------------------- tags */
@@ -345,6 +578,15 @@ pub fn player_play(state: State<AppState>, id: i64, start_ms: Option<i64>, loop_
         state.player.seek(ms).map_err(fail)?;
     }
     let _ = db::note_play(&conn(&state.db), id);
+    Ok(state.player.status())
+}
+
+/// Check-listen from the duplicate dialog. Deliberately skips `note_play`: an
+/// audition is not a real play and must not pad the most-played ranking.
+#[tauri::command]
+pub fn player_preview(state: State<AppState>, id: i64) -> Cmd<PlayerStatus> {
+    let (path, duration) = db::track_play_target(&conn(&state.db), id).map_err(fail)?;
+    state.player.play(&path, id, duration).map_err(fail)?;
     Ok(state.player.status())
 }
 
@@ -436,7 +678,8 @@ pub fn open_link(url: String) -> Cmd<()> {
     if !url.starts_with("https://github.com/") {
         return Err("只能打开 GitHub 链接".into());
     }
-    open_in_explorer(&url);
+    use std::os::windows::process::CommandExt;
+    let _ = Command::new("explorer").creation_flags(0x08000000).arg(&url).spawn();
     Ok(())
 }
 

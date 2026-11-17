@@ -6,12 +6,16 @@
   const api = {
     // library
     pickRoot: () => invoke("pick_root", {}),
+    pickAudioFiles: () => invoke("pick_audio_files", {}),
     addRoot: (path) => invoke("add_root", { path }),
+    importPaths: (paths) => invoke("import_paths", { paths }),
     removeRoot: (id) => invoke("remove_root", { id }),
     listRoots: () => invoke("list_roots", {}),
     scan: (rootId, force) => invoke("scan", { rootId: rootId ?? null, force: !!force }),
     abortScan: () => invoke("abort_scan", {}),
     stats: () => invoke("stats", {}),
+    findDuplicates: () => invoke("find_duplicates", {}),
+    ignoreDuplicates: (sig) => invoke("ignore_duplicates", { sig }),
 
     // tracks
     query: (filter) => invoke("query", { filter }),
@@ -24,6 +28,7 @@
     setRating: (ids, rating) => invoke("set_rating", { ids, rating }),
     removeTracks: (ids) => invoke("remove_tracks", { ids }),
     deleteFiles: (ids) => invoke("delete_files", { ids }),
+    undo: () => invoke("undo", {}),
     reveal: (id) => invoke("reveal", { id }),
     rebuildPeaks: () => invoke("rebuild_peaks", {}),
 
@@ -35,6 +40,7 @@
 
     // playback
     play: (id, startMs, loop) => invoke("player_play", { id, startMs: startMs ?? 0, loopOn: !!loop }),
+    preview: (id) => invoke("player_preview", { id }),
     toggle: () => invoke("player_toggle", {}),
     stop: () => invoke("player_stop", {}),
     seek: (ms) => invoke("player_seek", { ms }),

@@ -42,6 +42,7 @@ fn migrate_legacy_db(target: &std::path::Path) {
 
 pub fn run() {
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_drag::init())
         .setup(|app| {
             let db_path = app.path().resolve("sfx.db", tauri::path::BaseDirectory::AppData)?;
             if let Some(dir) = db_path.parent() {
@@ -54,14 +55,18 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::pick_root,
+            commands::pick_audio_files,
             commands::pick_save_json,
             commands::pick_open_json,
             commands::list_roots,
             commands::add_root,
+            commands::import_paths,
             commands::remove_root,
             commands::scan,
             commands::abort_scan,
             commands::stats,
+            commands::find_duplicates,
+            commands::ignore_duplicates,
             commands::rebuild_peaks,
             commands::query,
             commands::track_detail,
@@ -73,6 +78,7 @@ pub fn run() {
             commands::set_rating,
             commands::remove_tracks,
             commands::delete_files,
+            commands::undo,
             commands::reveal,
             commands::open_db_folder,
             commands::copy_paths,
@@ -85,6 +91,7 @@ pub fn run() {
             commands::view_update,
             commands::view_delete,
             commands::player_play,
+            commands::player_preview,
             commands::player_toggle,
             commands::player_stop,
             commands::player_seek,

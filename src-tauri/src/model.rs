@@ -187,6 +187,7 @@ pub struct Stats {
     pub untagged: i64,
     pub notes: i64,
     pub recent: i64,
+    pub played: i64,
     pub clipped: i64,
     pub undecodable: i64,
     pub tag_count: i64,
@@ -197,6 +198,42 @@ pub struct Stats {
     pub sample_rates: Vec<FacetCount>,
     pub channels: Vec<FacetCount>,
     pub durations: Vec<FacetCount>,
+}
+
+/// One member of a suspected-duplicate group. Groups are advisory: the user
+/// picks what to remove, nothing is deleted by the detection itself.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DupTrack {
+    pub id: i64,
+    pub name: String,
+    pub alias: Option<String>,
+    pub path: String,
+    pub dir: String,
+    pub size_bytes: i64,
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DupGroup {
+    /// Fingerprint of the shared recording; the frontend sends it back when the
+    /// user decides the group is made of distinct takes.
+    pub sig: String,
+    pub tracks: Vec<DupTrack>,
+    pub wasted_bytes: i64,
+}
+
+/// Library-only fields of one track, captured before a mutation so the change
+/// can be undone. Never touches the audio file itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackSnap {
+    pub id: i64,
+    pub alias: Option<String>,
+    pub notes: String,
+    pub rating: i64,
+    pub tag_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

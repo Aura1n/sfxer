@@ -29,6 +29,7 @@
     { id: "untagged", label: "未打标签", icon: "tagOff" },
     { id: "notes", label: "有备注", icon: "note" },
     { id: "recent", label: "最近导入", icon: "history" },
+    { id: "played", label: "最常播放", icon: "playFill", countKey: "played" },
     { id: "undecodable", label: "不可解码", icon: "broken", countKey: "undecodable" },
   ];
 
@@ -348,7 +349,7 @@
         ? "没有符合条件的条目"
         : S.roots.length
           ? "此范围内还没有音频文件"
-          : "还没有添加文件夹";
+          : "还没有导入音频或添加文件夹";
     } else {
       dom.listEmpty.hidden = true;
     }
@@ -529,6 +530,12 @@
       item.addEventListener("click", () => {
         S.filter.scope = sc.id;
         S.filter.rootId = null;
+        // 最常播放按次数排才有意义，其余范围保留用户自己的排序。
+        if (sc.id === "played") {
+          S.filter.sort = "plays";
+          S.filter.dir = "desc";
+          renderHead();
+        }
         renderScopes();
         renderRoots();
         reload();
@@ -1067,6 +1074,11 @@
   const quickTags = () =>
     [...S.tags].sort((a, b) => (b.useCount || 0) - (a.useCount || 0)).slice(0, 9);
 
+  // Notes typed in the queue save on a short pause; stepping or leaving
+  // flushes them first so a quick Enter never drops the last words.
+  let triageSaveNotes = null;
+  let triageToggleTag = null;
+
   async function startTriage() {
     if (S.triage.on) return;
     const body = dom.app.querySelector(".body");
@@ -1094,6 +1106,11 @@
 
   async function exitTriage() {
     if (!S.triage.on) return;
+    if (triageSaveNotes) {
+      triageSaveNotes();
+      triageSaveNotes = null;
+    }
+    triageToggleTag = null;
     S.triage = { on: false, i: 0, total: 0 };
     S.filter.limit = PAGE;
     await Promise.all([refreshTags(), refreshCounts()]);
@@ -1107,6 +1124,7 @@
   // untagged set, so it leaves the list too.
   function triageStep(delta) {
     if (!S.rows.length) return exitTriage();
+    if (triageSaveNotes) triageSaveNotes();
     const r = triageCurrent();
     if (delta > 0 && r && r.tagIds && r.tagIds.length) {
       S.rows.splice(S.triage.i, 1);
@@ -1133,31 +1151,11 @@
     selectRow(next, null);
   }
 
-  // A quick tag is a one-key decision: put it on and move on. Pressing it again
-  // while the item already carries it takes it back off and holds position.
+  // A quick tag toggles in place: an item can collect several tags before
+  // Enter moves the queue on, and the row leaves the untagged list only when
+  // the queue steps past it.
   async function triageTag(tagId) {
-    const r = triageCurrent();
-    if (!r) return;
-    const ids = r.tagIds || [];
-    if (ids.includes(tagId)) {
-      await api.updateTags([r.id], [], [tagId]);
-      r.tagIds = ids.filter((x) => x !== tagId);
-      showDetail();
-      return;
-    }
-    await api.updateTags([r.id], [tagId], []);
-    const t = S.tagById.get(tagId);
-    r.tagIds = ids.concat(tagId);
-    S.rows.splice(S.triage.i, 1);
-    S.total = Math.max(0, S.total - 1);
-    if (!S.rows.length) {
-      flash("整理完成，队列已清空");
-      return exitTriage();
-    }
-    if (S.triage.i >= S.rows.length) S.triage.i = S.rows.length - 1;
-    flash(`「${(t && t.name) || ""}」 · 剩余 ${F.num(S.rows.length)}`);
-    ensureCursorVisible(S.triage.i);
-    selectRow(S.triage.i, null);
+    if (triageToggleTag) await triageToggleTag(tagId);
   }
 
   function renderTriage(d) {
@@ -1178,16 +1176,27 @@
     const head = section();
     head.appendChild(aliasHead(d));
 
+    // Tag state lives here, not in the detail object's snapshot: chips and
+    // quick keys repaint this card in place so the notes field keeps focus.
+    const tagState = {};
+    for (const id of d.tagIds || []) tagState[id] = "on";
+    const nameOf = (tagId) => {
+      const t = S.tags.find((x) => x.id === tagId);
+      return (t && t.name) || "";
+    };
+
     const tagSec = section("打标签", "tag");
     const qs = quickTags();
     const quick = el("div", "quick-tags");
+    const quickBtns = [];
     qs.forEach((t, idx) => {
-      const b = el("button", "qtag" + ((d.tagIds || []).includes(t.id) ? " on" : ""));
+      const b = el("button", "qtag" + (tagState[t.id] ? " on" : ""));
       b.type = "button";
       if (t.color) b.appendChild(window.TagUI.colorDot(t.color));
       b.appendChild(el("span", null, t.name));
       b.appendChild(el("kbd", null, String(idx + 1)));
-      b.addEventListener("click", () => triageTag(t.id));
+      b.addEventListener("click", () => setTag(t.id, !tagState[t.id]));
+      quickBtns.push(b);
       quick.appendChild(b);
     });
     if (qs.length) tagSec.appendChild(quick);
@@ -1195,27 +1204,72 @@
 
     const editorHost = el("div", "tag-editor");
     tagSec.appendChild(editorHost);
-    const state = {};
-    for (const id of d.tagIds || []) state[id] = "on";
-    window.TagUI.editor(
-      editorHost,
-      S.tags,
-      state,
-      async (tagId, active) => {
-        await api.updateTags([d.id], active ? [tagId] : [], active ? [] : [tagId]);
-        const r = triageCurrent();
-        if (r) r.tagIds = active ? (r.tagIds || []).concat(tagId) : (r.tagIds || []).filter((x) => x !== tagId);
-        // Hand-picking several tags keeps the item on screen; Enter moves on.
-        showDetail();
-      },
-      async (names) => {
-        const ids = await ensureTags(names);
-        await api.updateTags([d.id], ids, []);
-        const r = triageCurrent();
-        if (r) r.tagIds = (r.tagIds || []).concat(ids);
-        showDetail();
+
+    async function setTag(tagId, active) {
+      const r = triageCurrent();
+      if (!r) return;
+      await api.updateTags([r.id], active ? [tagId] : [], active ? [] : [tagId]);
+      if (active) tagState[tagId] = "on";
+      else delete tagState[tagId];
+      r.tagIds = Object.keys(tagState).map(Number);
+      d.tagIds = r.tagIds;
+      paintTags();
+      flash(active ? `已添加「${nameOf(tagId)}」` : `已移除「${nameOf(tagId)}」`);
+    }
+
+    function paintTags() {
+      quickBtns.forEach((b, i) => b.classList.toggle("on", !!tagState[qs[i].id]));
+      editorHost.textContent = "";
+      window.TagUI.editor(
+        editorHost,
+        S.tags,
+        tagState,
+        (tagId, active) => setTag(tagId, active),
+        async (names) => {
+          const ids = await ensureTags(names);
+          await api.updateTags([d.id], ids, []);
+          for (const id of ids) tagState[id] = "on";
+          const r = triageCurrent();
+          if (r) r.tagIds = Object.keys(tagState).map(Number);
+          paintTags();
+        }
+      );
+    }
+    paintTags();
+    triageToggleTag = (tagId) => setTag(tagId, !tagState[tagId]);
+
+    const noteSec = section("备注", "note");
+    const ta = el("textarea", "notes");
+    ta.value = d.notes || "";
+    ta.spellcheck = false;
+    const saved = el("div", "bulk-note");
+    saved.style.marginTop = "4px";
+    noteSec.append(ta, saved);
+    let noteTimer = null;
+    let noteSaved = ta.value;
+    const flushNotes = () => {
+      if (noteTimer) {
+        clearTimeout(noteTimer);
+        noteTimer = null;
       }
-    );
+      const v = ta.value;
+      if (v === noteSaved) return;
+      noteSaved = v;
+      d.notes = v;
+      api.setNotes([d.id], v, "replace").then(() => {
+        saved.textContent = `已保存 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+        const row = S.rows.find((r) => r.id === d.id);
+        if (row) row.hasNotes = !!v.trim();
+        refreshCounts();
+        setTimeout(() => (saved.textContent = ""), 1600);
+      });
+    };
+    ta.addEventListener("input", () => {
+      d.notes = ta.value;
+      if (noteTimer) clearTimeout(noteTimer);
+      noteTimer = setTimeout(flushNotes, 450);
+    });
+    triageSaveNotes = flushNotes;
 
     const navSec = section();
     const nav = el("div", "tri-nav");
@@ -1227,7 +1281,7 @@
     next.addEventListener("click", () => triageStep(1));
     nav.append(prev, next);
     navSec.appendChild(nav);
-    navSec.appendChild(el("div", "bulk-note", "1-9 打标签并跳过 · Enter 下一条 · 空格试听 · Esc 退出"));
+    navSec.appendChild(el("div", "bulk-note", "1-9 打标签，可连按多个 · Enter 下一条 · 空格试听 · Esc 退出"));
 
     renderStatus();
   }
@@ -1680,6 +1734,10 @@
     scan.appendChild(setRow("重建全部波形", "修改精度或升级解码器后使用；大库需要数分钟", rb));
 
     const src = setGroup("来源", "folder");
+    const addFiles = el("button", "btn subtle");
+    addFiles.innerHTML = icon("import") + "<span>选择文件</span>";
+    addFiles.addEventListener("click", importFiles);
+    src.appendChild(setRow("导入音频文件", "可多选；文件留在原处，只把信息写入本库", addFiles));
     const add = el("button", "btn subtle");
     add.innerHTML = icon("folderAdd") + "<span>添加文件夹</span>";
     add.addEventListener("click", addFolder);
@@ -2064,8 +2122,23 @@
     });
     dom.btnSettingsClose.addEventListener("click", () => dom.dlgSettings.close());
     makeDraggable(dom.dlgSettings, dom.settingsHead);
-    $("btn-add-folder").addEventListener("click", addFolder);
+    flyoutFor($("btn-import"), $("flyout-import"), buildImportFlyout);
     $("btn-rescan").addEventListener("click", () => api.scan(null, false));
+
+    $("btn-dupes").addEventListener("click", () => {
+      $("dlg-dupes").showModal();
+      startDupesPoll();
+      runDupes();
+    });
+    $("btn-dupes-close").addEventListener("click", () => $("dlg-dupes").close());
+    $("dlg-dupes").addEventListener("close", () => {
+      stopDupesPreview();
+      stopDupesPoll();
+      dupesPlayingId = null;
+    });
+    $("dupes-remove").addEventListener("click", dupesRemove);
+    $("dupes-delete").addEventListener("click", dupesDelete);
+    makeDraggable($("dlg-dupes"), $("dupes-head"));
 
     dom.search.addEventListener("input", debounce(() => {
       S.filter.text = dom.search.value.trim();
@@ -2173,6 +2246,7 @@
         return;
       }
       selectRow(index, e);
+      beginRowDrag(e, index);
     });
 
     dom.rowsVirtual.addEventListener("dblclick", (e) => {
@@ -2199,6 +2273,78 @@
     });
   }
 
+  /* ------------------------------------------------------------- drag out */
+  // Pressing a row and moving past a small threshold hands the selected files
+  // to the OS drag loop (tauri-plugin-drag), so they can be dropped into a DAW
+  // or Explorer. Mode is always copy: the source files are never moved.
+  let draggingOut = false;
+  function beginRowDrag(e, index) {
+    if (e.button !== 0) return;
+    const r = S.rows[index];
+    if (!r) return;
+    const x0 = e.clientX, y0 = e.clientY;
+    let done = false;
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    const onUp = () => { done = true; cleanup(); };
+    const onMove = (ev) => {
+      if (done) return;
+      const dx = ev.clientX - x0, dy = ev.clientY - y0;
+      if (dx * dx + dy * dy < 36) return;
+      done = true;
+      cleanup();
+      const rows = S.sel.has(r.id) ? selectedRows() : [r];
+      startFileDrag(rows);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
+
+  async function startFileDrag(rows) {
+    const drag = window.__TAURI__ && window.__TAURI__.drag;
+    if (!drag) return;
+    const paths = rows.map((r) => r.path).filter(Boolean);
+    if (!paths.length) return;
+    draggingOut = true;
+    try {
+      await drag.startDrag({ item: paths, icon: makeDragImage(rows), mode: "copy" });
+    } catch (err) {
+      flash(`拖出失败：${err}`, "err");
+    } finally {
+      draggingOut = false;
+      $("drop-overlay").hidden = true;
+    }
+  }
+
+  function makeDragImage(rows) {
+    const raw = rows.length > 1 ? `${rows.length} 个音频文件` : (rows[0].alias || rows[0].name);
+    const text = raw.length > 20 ? raw.slice(0, 19) + "…" : raw;
+    const c = document.createElement("canvas");
+    const ctx = c.getContext("2d");
+    const font = "13px " + (getComputedStyle(document.body).fontFamily || "sans-serif");
+    ctx.font = font;
+    const w = Math.min(300, Math.ceil(ctx.measureText(text).width) + 46);
+    const h = 32;
+    c.width = w; c.height = h;
+    ctx.font = font;
+    ctx.fillStyle = "rgba(32,32,32,0.92)";
+    ctx.beginPath();
+    ctx.roundRect(0, 0, w, h, 7);
+    ctx.fill();
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#60cdff";
+    ctx.font = "14px sans-serif";
+    ctx.fillText("♪", 11, h / 2 + 1);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = font;
+    ctx.fillText(text, 27, h / 2 + 1);
+    return c.toDataURL("image/png");
+  }
+
   function togglePane(which) {
     if (which === "sidebar") {
       dom.app.querySelector(".body").classList.toggle("no-sidebar");
@@ -2217,7 +2363,7 @@
       `将 ${ids.length} 个文件移到回收站？\n${one ? "它" : "它们"}会从库中移除，需要时可在系统回收站还原。`,
       { danger: true, okLabel: "移到回收站" }
     );
-    if (!ok) return;
+    if (!ok) return false;
     try {
       const r = await api.deleteFiles(ids);
       const current = window.PlayerView.currentTrack();
@@ -2226,8 +2372,227 @@
       await refreshAll();
       if (r.failed.length) flash(`已删除 ${r.deleted} 个文件，${r.failed.length} 个失败：${r.failed[0]}`, "err");
       else flash(`已删除 ${r.deleted} 个文件`);
+      return true;
     } catch (e) {
       flash(`删除失败：${e}`, "err");
+      return false;
+    }
+  }
+
+  /* ------------------------------------------------------ duplicate finder */
+  const dupesSel = new Set();
+  let dupesGroups = [];
+  let dupesPreviewId = null; // track this dialog started in the shared player
+  let dupesPlayingId = null; // whatever that player is sounding right now
+  let dupesPoll = 0;
+
+  async function runDupes() {
+    const summary = $("dupes-summary");
+    stopDupesPreview();
+    summary.textContent = "正在检测…";
+    $("dupes-list").textContent = "";
+    dupesSel.clear();
+    try {
+      dupesGroups = await api.findDuplicates();
+    } catch (e) {
+      summary.textContent = `检测失败：${e}`;
+      updateDupesFoot();
+      return;
+    }
+    renderDupes();
+  }
+
+  function paintDupesSummary() {
+    const summary = $("dupes-summary");
+    if (!dupesGroups.length) {
+      summary.textContent = "没有发现重复素材";
+      return;
+    }
+    const extra = dupesGroups.reduce((n, g) => n + g.tracks.length - 1, 0);
+    const wasted = dupesGroups.reduce((n, g) => n + g.wastedBytes, 0);
+    summary.textContent = `${dupesGroups.length} 组 · ${extra} 个多余副本 · 可释放 ${F.bytes(wasted)}`;
+  }
+
+  function renderDupes() {
+    const list = $("dupes-list");
+    list.textContent = "";
+    paintDupesSummary();
+    for (const g of dupesGroups) {
+      const card = el("div", "dup-group");
+      const head = el("div", "dup-head");
+      head.appendChild(el("span", null, `${g.tracks.length} 个相同`));
+      head.appendChild(el("span", "dup-meta", `每个 ${F.bytes(g.tracks[0].sizeBytes)}`));
+      const ignore = el("button", "dup-ignore", "不是重复");
+      ignore.type = "button";
+      ignore.title = "试听后确认不是同一段录音，不再对它们做重复检测";
+      ignore.addEventListener("click", () => ignoreDupGroup(g, card));
+      head.appendChild(ignore);
+      card.appendChild(head);
+      g.tracks.forEach((t, ti) => {
+        const row = el("div", "dup-row");
+        row.dataset.id = String(t.id);
+        const cb = el("input");
+        cb.type = "checkbox";
+        // 默认保留每组最早入库的一个，其余勾选待清理。
+        cb.checked = ti > 0;
+        if (ti > 0) dupesSel.add(t.id);
+        cb.addEventListener("change", () => {
+          if (cb.checked) dupesSel.add(t.id);
+          else dupesSel.delete(t.id);
+          updateDupesFoot();
+        });
+        row.appendChild(cb);
+        const play = el("button", "dup-play");
+        play.type = "button";
+        play.innerHTML = icon("playFill");
+        play.title = "试听";
+        play.addEventListener("click", (e) => {
+          e.stopPropagation();
+          auditionDup(t.id);
+        });
+        row.appendChild(play);
+        const name = el("span", "dup-name", t.alias || t.name);
+        name.title = t.path;
+        row.appendChild(name);
+        const dir = el("span", "dup-dir", t.dir);
+        dir.title = t.dir;
+        row.appendChild(dir);
+        row.appendChild(el("span", "dup-dur", F.time(t.durationMs)));
+        row.addEventListener("click", (e) => {
+          if (e.target === cb || e.target.closest("button")) return;
+          cb.checked = !cb.checked;
+          cb.dispatchEvent(new Event("change"));
+        });
+        card.appendChild(row);
+      });
+      list.appendChild(card);
+    }
+    paintDupesPlaying();
+    updateDupesFoot();
+  }
+
+  async function auditionDup(id) {
+    if (id === dupesPlayingId) {
+      api.stop();
+      dupesPreviewId = null;
+      dupesPlayingId = null;
+      window.PlayerView.setPreview(false);
+      paintDupesPlaying();
+      return;
+    }
+    try {
+      await api.preview(id);
+      dupesPreviewId = id;
+      dupesPlayingId = id;
+      window.PlayerView.setPreview(true);
+      paintDupesPlaying();
+    } catch (e) {
+      flash(`无法试听：${e}`, "err");
+    }
+  }
+
+  function paintDupesPlaying() {
+    for (const row of $("dupes-list").querySelectorAll(".dup-row")) {
+      const on = Number(row.dataset.id) === dupesPlayingId;
+      row.classList.toggle("playing", on);
+      const btn = row.querySelector(".dup-play");
+      if (!btn) continue;
+      btn.classList.toggle("on", on);
+      btn.innerHTML = icon(on ? "stopFill" : "playFill");
+      btn.title = on ? "停止试听" : "试听";
+    }
+  }
+
+  function stopDupesPreview() {
+    if (dupesPreviewId === null) return;
+    api.stop();
+    dupesPreviewId = null;
+    dupesPlayingId = null;
+    window.PlayerView.setPreview(false);
+    paintDupesPlaying();
+  }
+
+  // The dialog stays open across selections, so it polls the shared player to
+  // keep its own row indicator honest without disturbing the main bar.
+  function startDupesPoll() {
+    if (dupesPoll) return;
+    dupesPoll = setInterval(async () => {
+      try {
+        const st = await api.status();
+        const id = st && (st.playing || st.paused) && st.trackId != null ? st.trackId : null;
+        if (dupesPreviewId !== null && id !== dupesPreviewId) {
+          dupesPreviewId = null;
+          window.PlayerView.setPreview(false);
+        }
+        if (id !== dupesPlayingId) {
+          dupesPlayingId = id;
+          paintDupesPlaying();
+        }
+      } catch (_) {}
+    }, 250);
+  }
+
+  function stopDupesPoll() {
+    if (!dupesPoll) return;
+    clearInterval(dupesPoll);
+    dupesPoll = 0;
+  }
+
+  async function ignoreDupGroup(g, card) {
+    try {
+      await api.ignoreDuplicates(g.sig);
+    } catch (e) {
+      flash(`操作失败：${e}`, "err");
+      return;
+    }
+    if (dupesPreviewId !== null && g.tracks.some((t) => t.id === dupesPreviewId)) {
+      stopDupesPreview();
+    }
+    for (const t of g.tracks) dupesSel.delete(t.id);
+    dupesGroups = dupesGroups.filter((x) => x !== g);
+    card.remove();
+    paintDupesSummary();
+    updateDupesFoot();
+    flash("已标记为不是重复，Ctrl+Z 可恢复");
+  }
+
+  function updateDupesFoot() {
+    const n = dupesSel.size;
+    $("dupes-selinfo").textContent = n ? `已选 ${n} 个` : "";
+    $("dupes-remove").disabled = !n;
+    $("dupes-delete").disabled = !n;
+  }
+
+  async function dupesRemove() {
+    const ids = [...dupesSel];
+    if (!ids.length) return;
+    const ok = await confirm(`从库中移除 ${ids.length} 个条目？文件保留在磁盘。`);
+    if (!ok) return;
+    try {
+      await api.removeTracks(ids);
+      ids.forEach((i) => S.sel.delete(i));
+      await refreshAll();
+      await runDupes();
+    } catch (e) {
+      flash(`移除失败：${e}`, "err");
+    }
+  }
+
+  async function dupesDelete() {
+    const ids = [...dupesSel];
+    if (!ids.length) return;
+    if (await deleteFiles(ids)) await runDupes();
+  }
+
+  async function undoLast() {
+    try {
+      const label = await api.undo();
+      await refreshAll();
+      if ($("dlg-dupes").open) await runDupes();
+      flash(`已撤销：${label}`);
+    } catch (e) {
+      const msg = String(e);
+      flash(msg, msg === "没有可撤销的操作" ? undefined : "err");
     }
   }
 
@@ -2351,7 +2716,10 @@
     const tag = (e.target.tagName || "").toLowerCase();
     const typing = tag === "input" || tag === "textarea" || e.target.isContentEditable;
     const inDialog = [...document.querySelectorAll("dialog")].some((d) => d.open);
-    if (inDialog) return;
+    // Undo stays live inside a dialog so a "不是重复" decision can be taken back
+    // on the spot, but text fields keep their own undo history.
+    const undoKey = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z";
+    if (inDialog && (!undoKey || typing)) return;
 
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
       e.preventDefault();
@@ -2493,6 +2861,9 @@
         } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r") {
           e.preventDefault();
           api.scan(null, false);
+        } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+          e.preventDefault();
+          undoLast();
         }
     }
   }
@@ -2503,6 +2874,33 @@
       await api.addRoot(picked);
       await refreshAll();
     }
+  }
+
+  // Loose files go straight into the library; they never turn their folder
+  // into a scan root, so picking one file here imports exactly that file.
+  async function importFiles() {
+    const paths = await api.pickAudioFiles();
+    if (!paths || !paths.length) return;
+    const r = await api.importPaths(paths);
+    if (!r.started) flash(r.skipped ? `没有导入：${r.skipped} 个文件不是音频` : "没有可导入的内容");
+  }
+
+  function buildImportFlyout(box) {
+    const close = () => {
+      box.hidden = true;
+      $("btn-import").setAttribute("aria-expanded", "false");
+    };
+    const files = menuItem("导入音频文件…", "import");
+    files.addEventListener("click", () => {
+      close();
+      importFiles();
+    });
+    const folder = menuItem("添加文件夹…", "folderAdd");
+    folder.addEventListener("click", () => {
+      close();
+      addFolder();
+    });
+    box.append(files, folder);
   }
 
   /* ------------------------------------------------------------------ boot */
@@ -2591,26 +2989,33 @@
       } catch (_) {}
     }, 125);
 
-    // drag & drop folders anywhere to add them
+    // drag files or folders anywhere to import them
     try {
       const wv = T.webview ? T.webview.getCurrentWebview() : window.__TAURI__.window.getCurrentWindow();
+      const overlay = $("drop-overlay");
       await wv.onDragDropEvent(async (e) => {
-        if (e.payload.type !== "drop") return;
-        const paths = e.payload.paths || [];
-        let added = 0;
-        let rejected = null;
-        for (const p of paths) {
-          try {
-            await api.addRoot(p);
-            added++;
-          } catch (err) {
-            rejected = String(err);
-          }
+        const kind = e.payload.type;
+        if (draggingOut) return;
+        if (kind === "enter" || kind === "over") {
+          overlay.hidden = false;
+          return;
         }
-        await refreshAll();
-        // Silence here reads as "the drop did nothing".
-        if (added) flash(`已添加 ${added} 个文件夹${rejected ? `，${rejected}` : ""}`);
-        else if (rejected) flash(rejected, "err");
+        if (kind === "leave") {
+          overlay.hidden = true;
+          return;
+        }
+        if (kind !== "drop") return;
+        overlay.hidden = true;
+        const paths = e.payload.paths || [];
+        if (!paths.length) return;
+        try {
+          const r = await api.importPaths(paths);
+          // A started import reports through scan://progress and scan://done;
+          // only a drop that changed nothing needs an immediate word here.
+          if (!r.started) flash(r.skipped ? `没有导入：${r.skipped} 个文件不是音频` : "没有可导入的内容");
+        } catch (err) {
+          flash(String(err), "err");
+        }
       });
     } catch (err) {
       console.warn("drag&drop unavailable:", err);

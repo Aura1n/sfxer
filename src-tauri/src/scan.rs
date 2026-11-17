@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
 use crate::db::{self, NewTrack, SharedDb};
-use crate::model::{ScanProgress, ScanSummary, Settings};
+use crate::model::{Root, ScanProgress, ScanSummary, Settings};
 use crate::probe;
 
 /// Everything we can at least identify and index. Formats outside the decoders'
@@ -118,7 +118,7 @@ type Fingerprints = HashMap<String, (i64, i64, i64, bool)>;
 /// several threads at once, so it never touches the database.
 fn probe_file(
     path: &Path,
-    root_id: i64,
+    root_id: Option<i64>,
     indexed: &Fingerprints,
     force: bool,
     settings: &Settings,
@@ -165,7 +165,7 @@ fn probe_file(
         name,
         ext,
         dir,
-        root_id: Some(root_id),
+        root_id,
         size_bytes: meta.len() as i64,
         mtime,
         duration_ms: meta_info.as_ref().and_then(|m| m.duration_ms),
@@ -234,7 +234,8 @@ fn flush_batch(
 }
 
 /// Walks each root, probing only what changed. Runs on its own thread; `app`
-/// exists purely to publish progress.
+/// exists purely to publish progress. `drop_files` are loose files handed in by
+/// drag & drop; they are probed first and keep their containing root, if any.
 pub fn run(
     db: SharedDb,
     app: AppHandle,
@@ -242,6 +243,7 @@ pub fn run(
     force: bool,
     settings: Settings,
     control: ScanControl,
+    drop_files: Vec<PathBuf>,
 ) -> ScanSummary {
     let started = Instant::now();
     control.running.store(true, Ordering::SeqCst);
@@ -249,6 +251,50 @@ pub fn run(
 
     let mut summary = ScanSummary { scanned: 0, added: 0, updated: 0, removed: 0, errors: 0, seconds: 0.0 };
     let buckets = settings.peak_buckets.max(32) as usize;
+
+    if !drop_files.is_empty() && !control.abort.load(Ordering::SeqCst) {
+        let total = drop_files.len() as i64;
+        emit(&app, "导入", 0, total, "");
+        let (indexed, roots) = match db.lock() {
+            Ok(conn) => (
+                db::fingerprint_map(&conn, None).unwrap_or_default(),
+                db::list_roots(&conn).unwrap_or_default(),
+            ),
+            Err(_) => (Fingerprints::new(), Vec::new()),
+        };
+        let mut batch: Vec<NewTrack> = Vec::with_capacity(WRITE_BATCH);
+        let mut meta_batch: Vec<(i64, probe::Meta)> = Vec::new();
+        let mut last_emit = Instant::now();
+        for (i, path) in drop_files.iter().enumerate() {
+            if control.abort.load(Ordering::SeqCst) {
+                break;
+            }
+            let msg = probe_file(path, containing_root(&roots, path), &indexed, false, &settings, buckets);
+            summary.scanned += 1;
+            match msg.result {
+                ProbeResult::Track { track, existed } => {
+                    if existed {
+                        summary.updated += 1;
+                    } else {
+                        summary.added += 1;
+                    }
+                    batch.push(track);
+                }
+                ProbeResult::Meta { id, meta } => {
+                    summary.updated += 1;
+                    meta_batch.push((id, meta));
+                }
+                ProbeResult::Skip => {}
+                ProbeResult::Error => summary.errors += 1,
+            }
+            if batch.len() >= WRITE_BATCH || last_emit.elapsed() >= Duration::from_millis(160) {
+                flush_batch(&db, &mut batch, &mut meta_batch, false);
+                emit(&app, "导入", (i + 1) as i64, total, &msg.path);
+                last_emit = Instant::now();
+            }
+        }
+        flush_batch(&db, &mut batch, &mut meta_batch, false);
+    }
 
     for (root_id, root_path) in &targets {
         if control.abort.load(Ordering::SeqCst) {
@@ -304,7 +350,7 @@ pub fn run(
                     if i >= candidates.len() {
                         break;
                     }
-                    let msg = probe_file(&candidates[i], *root_id, indexed, force, settings, buckets);
+                    let msg = probe_file(&candidates[i], Some(*root_id), indexed, force, settings, buckets);
                     if tx.send(msg).is_err() {
                         break;
                     }
@@ -401,6 +447,24 @@ fn emit(app: &AppHandle, phase: &str, done: i64, total: i64, current: &str) {
             current: current.rsplit(['\\', '/']).next().unwrap_or("").to_string(),
         },
     );
+}
+
+/// Deepest existing root that covers a dropped file, so the file keeps behaving
+/// like the rest of that folder on later scans and root removals.
+fn containing_root(roots: &[Root], path: &Path) -> Option<i64> {
+    let norm = |s: &str| db::strip_verbatim(s).replace('/', "\\").to_lowercase();
+    let p = norm(&path.to_string_lossy());
+    roots
+        .iter()
+        .filter_map(|r| {
+            let mut rp = norm(&r.path);
+            if !rp.ends_with('\\') {
+                rp.push('\\');
+            }
+            if p.starts_with(&rp) { Some((rp.len(), r.id)) } else { None }
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, id)| id)
 }
 
 /// Recomputes waveforms for files already in the library.

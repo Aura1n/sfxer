@@ -25,6 +25,7 @@
             <div class="flyout" id="flyout-sort" hidden></div>
           </div>
           <button class="qcmd" id="btn-rescan" title="重新扫描 (Ctrl+R)" aria-label="重新扫描"><span data-icon="sync"></span></button>
+          <button class="qcmd" id="btn-dupes" title="重复素材" aria-label="重复素材"><span data-icon="copy"></span></button>
           <button class="qcmd" id="btn-detail" title="详情面板 (Ctrl+I)" aria-label="切换详情"><span data-icon="panel"></span></button>
         </div>
 
@@ -36,7 +37,12 @@
           <button class="clear-btn" id="btn-search-clear" title="清除" aria-label="清除搜索"><span data-icon="clear"></span></button>
         </div>
 
-        <button class="cta" id="btn-add-folder"><span data-icon="folderAdd"></span><span>添加文件夹</span></button>
+        <div class="menu-anchor">
+          <button class="cta" id="btn-import" aria-haspopup="true" aria-expanded="false">
+            <span data-icon="import"></span><span>导入</span><span class="cta-caret" data-icon="down"></span>
+          </button>
+          <div class="flyout right" id="flyout-import" hidden></div>
+        </div>
 
         <div class="cmd-group">
           <button class="qcmd" id="btn-theme" title="主题" aria-label="切换主题"><span data-icon="moon"></span></button>
@@ -101,6 +107,10 @@
       </footer>
     </div>
 
+    <div id="drop-overlay" hidden>
+      <div class="drop-card"><span data-icon="import"></span><span>松开导入音频文件或文件夹</span></div>
+    </div>
+
     <dialog id="dlg-settings" class="dlg dlg-page">
       <div class="dlg-head" id="dlg-settings-head">
         <h2>设置</h2>
@@ -138,10 +148,27 @@
       </form>
     </dialog>
 
+    <dialog id="dlg-dupes" class="dlg dupes-dlg">
+      <div class="dlg-head" id="dupes-head">
+        <h2>重复素材</h2>
+        <div class="spacer"></div>
+        <button class="qcmd" id="btn-dupes-close" aria-label="关闭"><span data-icon="close"></span></button>
+      </div>
+      <div class="dupes-summary" id="dupes-summary"></div>
+      <div class="dupes-list" id="dupes-list"></div>
+      <div class="dlg-foot dupes-foot">
+        <span id="dupes-selinfo"></span>
+        <div class="spacer"></div>
+        <button class="btn" id="dupes-remove" type="button">移出库</button>
+        <button class="btn danger" id="dupes-delete" type="button">删除文件</button>
+      </div>
+    </dialog>
+
     <!-- api.js defines window.DOMX, which tag-render.js destructures at load. -->
     <script src="./api.js"></script>
     <script src="./tag-render.js"></script>
     <script src="./player-view.js"></script>
+    <script src="./tauri-drag.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -72,6 +72,10 @@ CREATE TABLE IF NOT EXISTS views(
   id         INTEGER PRIMARY KEY,
   name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
   filter     TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dup_ignored(
+  sig        TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL
 );
 "#;
@@ -498,6 +502,7 @@ fn build_where(f: &Filter, args: &mut Args) -> String {
             w.push(format!("t.added_at >= ?{i}"));
         }
         "clipped" => w.push("t.clipped = 1".into()),
+        "played" => w.push("t.play_count > 0".into()),
         "undecodable" => w.push("t.decodeable = 0".into()),
         "root" => {
             if let Some(rid) = f.root_id {
@@ -880,7 +885,7 @@ fn facet(conn: &Connection, sql: &str) -> AppResult<Vec<FacetCount>> {
 
 pub fn stats(conn: &Connection) -> AppResult<Stats> {
     let week_ago = now_secs() - 7 * 24 * 3600;
-    let (track_count, untagged, notes, recent, clipped, undecodable, total_duration_ms, total_size_bytes) = conn
+    let (track_count, untagged, notes, recent, played, clipped, undecodable, total_duration_ms, total_size_bytes) = conn
         .query_row(
             // Every SUM needs a COALESCE: over an empty library SQLite returns
             // NULL, and a typed read of that is an error, not a zero.
@@ -888,6 +893,7 @@ pub fn stats(conn: &Connection) -> AppResult<Stats> {
                       COALESCE(SUM(CASE WHEN NOT EXISTS(SELECT 1 FROM track_tags tt WHERE tt.track_id = t.id) THEN 1 ELSE 0 END), 0),
                       COALESCE(SUM(CASE WHEN trim(t.notes) <> '' THEN 1 ELSE 0 END), 0),
                       COALESCE(SUM(CASE WHEN t.added_at >= ?1 THEN 1 ELSE 0 END), 0),
+                      COALESCE(SUM(CASE WHEN t.play_count > 0 THEN 1 ELSE 0 END), 0),
                       COALESCE(SUM(CASE WHEN t.clipped = 1 THEN 1 ELSE 0 END), 0),
                       COALESCE(SUM(CASE WHEN t.decodeable = 0 THEN 1 ELSE 0 END), 0),
                       COALESCE(SUM(t.duration_ms), 0),
@@ -904,6 +910,7 @@ pub fn stats(conn: &Connection) -> AppResult<Stats> {
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
                     r.get::<_, i64>(7)?,
+                    r.get::<_, i64>(8)?,
                 ))
             },
         )?;
@@ -940,6 +947,7 @@ pub fn stats(conn: &Connection) -> AppResult<Stats> {
         untagged,
         notes,
         recent,
+        played,
         clipped,
         undecodable,
         total_duration_ms,
@@ -1254,4 +1262,318 @@ pub fn update_view(conn: &Connection, id: i64, name: &str, filter_json: &str) ->
 pub fn delete_view(conn: &Connection, id: i64) -> AppResult<()> {
     conn.prepare("DELETE FROM views WHERE id = ?1")?.execute(params![id])?;
     Ok(())
+}
+
+/// Stable fingerprint of one recording: byte size, duration and a hash of the
+/// stored waveform (or peak/RMS levels when no waveform exists). Groups keyed
+/// by it say which "not duplicates" decisions the user has already made, and
+/// the key survives rescans because it never includes the row id or path.
+fn fingerprint_sig(
+    size: i64,
+    duration: Option<i64>,
+    peaks: Option<&[u8]>,
+    peak: Option<f64>,
+    rms: Option<f64>,
+) -> String {
+    let mut buf: Vec<u8> = Vec::with_capacity(64);
+    buf.extend_from_slice(&size.to_le_bytes());
+    buf.extend_from_slice(&duration.unwrap_or(i64::MIN).to_le_bytes());
+    match peaks {
+        Some(p) => {
+            buf.push(1);
+            buf.extend_from_slice(p);
+        }
+        None => {
+            buf.push(0);
+            match peak {
+                Some(v) => {
+                    buf.push(1);
+                    buf.extend_from_slice(&v.to_bits().to_le_bytes());
+                }
+                None => buf.push(0),
+            }
+            match rms {
+                Some(v) => {
+                    buf.push(1);
+                    buf.extend_from_slice(&v.to_bits().to_le_bytes());
+                }
+                None => buf.push(0),
+            }
+        }
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in &buf {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Groups tracks that are almost certainly the same recording: identical byte
+/// size and duration plus an identical waveform fingerprint (or, when no
+/// waveform was stored, identical peak/RMS levels). Advisory only — the user
+/// decides what to remove, and groups they dismissed never come back.
+pub fn duplicates(conn: &Connection) -> AppResult<Vec<DupGroup>> {
+    let ignored: HashSet<String> = {
+        let mut stmt = conn.prepare("SELECT sig FROM dup_ignored")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT id, name, alias, path, dir, size_bytes, duration_ms, peak_db, rms_db, peaks
+         FROM tracks WHERE size_bytes > 0 ORDER BY id",
+    )?;
+    let mut groups: HashMap<String, Vec<DupTrack>> = HashMap::new();
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, i64>(5)?,
+            r.get::<_, Option<i64>>(6)?,
+            r.get::<_, Option<f64>>(7)?,
+            r.get::<_, Option<f64>>(8)?,
+            r.get::<_, Option<Vec<u8>>>(9)?,
+        ))
+    })?;
+    for row in rows.flatten() {
+        let (id, name, alias, path, dir, size, duration, peak, rms, peaks) = row;
+        let sig = fingerprint_sig(size, duration, peaks.as_deref(), peak, rms);
+        groups.entry(sig).or_default().push(DupTrack {
+            id,
+            name,
+            alias,
+            path,
+            dir,
+            size_bytes: size,
+            duration_ms: duration,
+        });
+    }
+    let mut out: Vec<DupGroup> = groups
+        .into_iter()
+        .filter(|(sig, g)| g.len() > 1 && !ignored.contains(sig))
+        .map(|(sig, tracks)| {
+            let wasted = tracks[0].size_bytes * (tracks.len() as i64 - 1);
+            DupGroup { sig, tracks, wasted_bytes: wasted }
+        })
+        .collect();
+    out.sort_by(|a, b| b.wasted_bytes.cmp(&a.wasted_bytes));
+    out.truncate(1000);
+    Ok(out)
+}
+
+/// Remembers that the user listened to a group and judged its members to be
+/// different takes rather than copies of one recording.
+pub fn ignore_dup(conn: &Connection, sig: &str) -> AppResult<()> {
+    conn.prepare("INSERT OR IGNORE INTO dup_ignored(sig, created_at) VALUES (?1, ?2)")?
+        .execute(params![sig, now_secs()])?;
+    Ok(())
+}
+
+pub fn unignore_dup(conn: &Connection, sig: &str) -> AppResult<()> {
+    conn.prepare("DELETE FROM dup_ignored WHERE sig = ?1")?.execute(params![sig])?;
+    Ok(())
+}
+
+/* -------------------------------------------------------------------- undo */
+
+pub fn snapshot_tracks(conn: &Connection, ids: &[i64]) -> AppResult<Vec<TrackSnap>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tags = tags_for_tracks(conn, ids)?;
+    let mut args = Args(Vec::new());
+    let marks = ids.iter().map(|id| format!("?{}", args.push(*id))).collect::<Vec<_>>();
+    let sql = format!("SELECT id, alias, notes, rating FROM tracks WHERE id IN ({})", marks.join(","));
+    let bound = args.refs();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(bound.as_slice(), |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows.flatten() {
+        out.push(TrackSnap {
+            id: row.0,
+            alias: row.1,
+            notes: row.2,
+            rating: row.3,
+            tag_ids: tags.get(&row.0).cloned().unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
+/// Puts captured fields back in one transaction. Tracks or tags that vanished
+/// in the meantime are skipped rather than resurrected half-way.
+pub fn restore_snapshots(conn: &Connection, snaps: &[TrackSnap]) -> AppResult<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let mut ids = Vec::new();
+    {
+        let mut upd = tx.prepare("UPDATE tracks SET alias = ?2, notes = ?3, rating = ?4 WHERE id = ?1")?;
+        let mut del = tx.prepare("DELETE FROM track_tags WHERE track_id = ?1")?;
+        let mut ins = tx.prepare("INSERT OR IGNORE INTO track_tags(track_id, tag_id, added_at) VALUES (?1, ?2, ?3)")?;
+        for s in snaps {
+            if upd.execute(params![s.id, s.alias, s.notes, s.rating])? == 0 {
+                continue;
+            }
+            del.execute(params![s.id])?;
+            for tag in &s.tag_ids {
+                ins.execute(params![s.id, tag, now_secs()])?;
+            }
+            ids.push(s.id);
+        }
+    }
+    tx.commit()?;
+    reindex_many(conn, &ids)?;
+    Ok(ids.len())
+}
+
+/// A full library row kept in memory so a removal can be put back exactly,
+/// including the waveform blob and the tag links.
+pub struct RemovedTrack {
+    pub id: i64,
+    pub root_id: Option<i64>,
+    pub path: String,
+    pub name: String,
+    pub alias: Option<String>,
+    pub ext: String,
+    pub dir: String,
+    pub size_bytes: i64,
+    pub mtime: i64,
+    pub duration_ms: Option<i64>,
+    pub sample_rate: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub channels: Option<i64>,
+    pub bitrate: Option<i64>,
+    pub codec: Option<String>,
+    pub container: Option<String>,
+    pub peak_db: Option<f64>,
+    pub rms_db: Option<f64>,
+    pub decodeable: bool,
+    pub clipped: bool,
+    pub peaks: Option<Vec<u8>>,
+    pub notes: String,
+    pub rating: i64,
+    pub added_at: i64,
+    pub play_count: i64,
+    pub last_played_at: Option<i64>,
+    pub tag_ids: Vec<i64>,
+}
+
+pub fn capture_tracks(conn: &Connection, ids: &[i64]) -> AppResult<Vec<RemovedTrack>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tags = tags_for_tracks(conn, ids)?;
+    let mut args = Args(Vec::new());
+    let marks = ids.iter().map(|id| format!("?{}", args.push(*id))).collect::<Vec<_>>();
+    let sql = format!(
+        "SELECT id, root_id, path, name, alias, ext, dir, size_bytes, mtime, duration_ms,
+                sample_rate, bit_depth, channels, bitrate, codec, container, peak_db, rms_db,
+                decodeable, clipped, peaks, notes, rating, added_at, play_count, last_played_at
+         FROM tracks WHERE id IN ({})",
+        marks.join(",")
+    );
+    let bound = args.refs();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(bound.as_slice(), |r| {
+        Ok(RemovedTrack {
+            id: r.get(0)?,
+            root_id: r.get(1)?,
+            path: r.get(2)?,
+            name: r.get(3)?,
+            alias: r.get(4)?,
+            ext: r.get(5)?,
+            dir: r.get(6)?,
+            size_bytes: r.get(7)?,
+            mtime: r.get(8)?,
+            duration_ms: r.get(9)?,
+            sample_rate: r.get(10)?,
+            bit_depth: r.get(11)?,
+            channels: r.get(12)?,
+            bitrate: r.get(13)?,
+            codec: r.get(14)?,
+            container: r.get(15)?,
+            peak_db: r.get(16)?,
+            rms_db: r.get(17)?,
+            decodeable: r.get::<_, i64>(18)? != 0,
+            clipped: r.get::<_, i64>(19)? != 0,
+            peaks: r.get(20)?,
+            notes: r.get(21)?,
+            rating: r.get(22)?,
+            added_at: r.get(23)?,
+            play_count: r.get(24)?,
+            last_played_at: r.get(25)?,
+            tag_ids: Vec::new(),
+        })
+    })?;
+    let mut out: Vec<RemovedTrack> = rows.flatten().collect();
+    for t in &mut out {
+        t.tag_ids = tags.get(&t.id).cloned().unwrap_or_default();
+    }
+    Ok(out)
+}
+
+/// Reinserts captured rows. The original id is kept when still free; a path
+/// that returned to the library by another route wins over the stale copy.
+pub fn restore_tracks(conn: &Connection, rows: &[RemovedTrack]) -> AppResult<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let mut ids = Vec::new();
+    {
+        let mut by_id = tx.prepare("SELECT COUNT(*) FROM tracks WHERE id = ?1")?;
+        let mut by_path = tx.prepare("SELECT COUNT(*) FROM tracks WHERE path = ?1")?;
+        let mut root_alive = tx.prepare("SELECT COUNT(*) FROM roots WHERE id = ?1")?;
+        let mut ins_id = tx.prepare(
+            r#"INSERT INTO tracks(id, root_id, path, name, alias, ext, dir, size_bytes, mtime,
+                  duration_ms, sample_rate, bit_depth, channels, bitrate, codec, container,
+                  peak_db, rms_db, decodeable, clipped, peaks, notes, rating, added_at,
+                  play_count, last_played_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)"#,
+        )?;
+        let mut ins_auto = tx.prepare(
+            r#"INSERT INTO tracks(root_id, path, name, alias, ext, dir, size_bytes, mtime,
+                  duration_ms, sample_rate, bit_depth, channels, bitrate, codec, container,
+                  peak_db, rms_db, decodeable, clipped, peaks, notes, rating, added_at,
+                  play_count, last_played_at)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)"#,
+        )?;
+        let mut link = tx.prepare("INSERT OR IGNORE INTO track_tags(track_id, tag_id, added_at) VALUES (?1, ?2, ?3)")?;
+        for t in rows {
+            if by_path.query_row(params![t.path], |r| r.get::<_, i64>(0))? > 0 {
+                continue;
+            }
+            let root_id = match t.root_id {
+                Some(rid) if root_alive.query_row(params![rid], |r| r.get::<_, i64>(0))? > 0 => Some(rid),
+                _ => None,
+            };
+            let id_free = by_id.query_row(params![t.id], |r| r.get::<_, i64>(0))? == 0;
+            let new_id = if id_free {
+                ins_id.execute(params![
+                    t.id, root_id, t.path, t.name, t.alias, t.ext, t.dir, t.size_bytes, t.mtime,
+                    t.duration_ms, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.codec,
+                    t.container, t.peak_db, t.rms_db, t.decodeable as i64, t.clipped as i64,
+                    t.peaks, t.notes, t.rating, t.added_at, t.play_count, t.last_played_at
+                ])?;
+                t.id
+            } else {
+                ins_auto.execute(params![
+                    root_id, t.path, t.name, t.alias, t.ext, t.dir, t.size_bytes, t.mtime,
+                    t.duration_ms, t.sample_rate, t.bit_depth, t.channels, t.bitrate, t.codec,
+                    t.container, t.peak_db, t.rms_db, t.decodeable as i64, t.clipped as i64,
+                    t.peaks, t.notes, t.rating, t.added_at, t.play_count, t.last_played_at
+                ])?;
+                tx.last_insert_rowid()
+            };
+            for tag in &t.tag_ids {
+                link.execute(params![new_id, tag, now_secs()])?;
+            }
+            ids.push(new_id);
+        }
+    }
+    tx.commit()?;
+    reindex_many(conn, &ids)?;
+    Ok(ids.len())
 }
