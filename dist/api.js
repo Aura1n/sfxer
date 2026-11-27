@@ -31,6 +31,8 @@
     undo: () => invoke("undo", {}),
     reveal: (id) => invoke("reveal", { id }),
     rebuildPeaks: () => invoke("rebuild_peaks", {}),
+    retryUndecodable: () => invoke("retry_undecodable", {}),
+    decoderInfo: () => invoke("decoder_info", {}),
 
     // tags
     tags: () => invoke("tags_list", {}),

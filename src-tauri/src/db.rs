@@ -90,9 +90,29 @@ pub fn open(db_path: &Path) -> AppResult<SharedDb> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "busy_timeout", 10_000)?;
     conn.execute_batch(SCHEMA)?;
-    add_missing_columns(&conn)?;
+    migrate(&conn)?;
     seed_settings(&conn)?;
     Ok(Arc::new(Mutex::new(conn)))
+}
+
+/// Bumped whenever a migration step is added below. Stored in SQLite's own
+/// `user_version`, so an older build can tell it is looking at a newer library.
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// Brings a library of any age up to the current shape. The shape checks are
+/// idempotent and run on every open (a column can be missing whatever the
+/// recorded version says); the numbered steps run once each.
+fn migrate(conn: &Connection) -> AppResult<()> {
+    add_missing_columns(conn)?;
+    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if current < 2 {
+        // "Retry undecodable" and the sidebar count both filter on this.
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_tracks_decodeable ON tracks(decodeable);")?;
+    }
+    if current < SCHEMA_VERSION {
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
+    Ok(())
 }
 
 /// `CREATE TABLE IF NOT EXISTS` never revisits an existing table, so a column
@@ -1058,6 +1078,16 @@ pub fn delete_track(conn: &Connection, id: i64) -> AppResult<()> {
 /// Used by "rebuild waveforms": every known file, with its stored id.
 pub fn all_tracks_for_rebuild(conn: &Connection) -> AppResult<Vec<(i64, String)>> {
     let mut stmt = conn.prepare("SELECT id, path FROM tracks ORDER BY id")?;
+    let out = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|x| x.ok())
+        .collect();
+    Ok(out)
+}
+
+/// The files a retry should look at again.
+pub fn undecodable_tracks(conn: &Connection) -> AppResult<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare("SELECT id, path FROM tracks WHERE decodeable = 0 ORDER BY id")?;
     let out = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .filter_map(|x| x.ok())

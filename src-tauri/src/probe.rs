@@ -28,21 +28,35 @@ pub struct Meta {
 
 pub fn read_meta(path: &Path) -> AppResult<Meta> {
     match read_meta_lofty(path) {
-        Ok(meta) => Ok(meta),
-        Err(err) => {
-            // Lofty refuses some containers it cannot fully parse (odd or
-            // slightly damaged headers) even though the audio decodes fine, so
-            // the data the UI needs is recovered with the decoders instead.
-            let ext = extension(path);
-            if ext == "ape" {
-                return meta_from_ape(path).map_err(|_| err);
+        Ok(meta) if meta.sample_rate.is_some() || meta.duration_ms.unwrap_or(0) > 0 => Ok(meta),
+        // Lofty answered but found nothing usable (a header it only half
+        // understood): the decoders get a chance to fill the gaps.
+        Ok(meta) => Ok(meta_by_decoders(path).unwrap_or(meta)),
+        // Lofty refuses some containers it cannot fully parse (odd or
+        // slightly damaged headers) even though the audio decodes fine, so
+        // the data the UI needs is recovered with the decoders instead.
+        Err(err) => meta_by_decoders(path).map_err(|_| err),
+    }
+}
+
+/// Tries every container the file could really be (by magic number first, then
+/// by extension), then an external ffprobe if one is installed.
+fn meta_by_decoders(path: &Path) -> AppResult<Meta> {
+    let declared = extension(path);
+    for ext in candidate_exts(path, &declared) {
+        if ext == "ape" {
+            if let Ok(meta) = meta_from_ape(path) {
+                return Ok(meta);
             }
-            if symphonia_exts(&ext) {
-                return meta_from_symphonia(path, &ext).map_err(|_| err);
+            continue;
+        }
+        if symphonia_exts(&ext) {
+            if let Ok(meta) = meta_from_symphonia(path, &ext) {
+                return Ok(meta);
             }
-            Err(err)
         }
     }
+    crate::external::probe_meta(path)
 }
 
 fn read_meta_lofty(path: &Path) -> AppResult<Meta> {
@@ -251,6 +265,219 @@ pub(crate) fn riff_exts(ext: &str) -> bool {
     matches!(ext, "wav" | "wave" | "bwf" | "w64" | "rf64" | "bw64")
 }
 
+/// Which family a container belongs to; a file whose extension disagrees with
+/// its magic number only keeps the extension as a second guess when both name
+/// the same family.
+fn family(ext: &str) -> &str {
+    match ext {
+        "wav" | "wave" | "bwf" | "rf64" | "bw64" => "riff",
+        "aif" | "aiff" | "aifc" => "aiff",
+        "ogg" | "oga" | "opus" | "spx" => "ogg",
+        "m4a" | "m4b" | "m4p" | "m4r" | "mp4" | "3gp" => "mp4",
+        "mka" | "mkv" | "webm" => "mkv",
+        "aac" | "adts" => "aac",
+        "mp1" | "mp2" | "mp3" | "mpga" => "mpeg",
+        other => other,
+    }
+}
+
+fn magic_at(h: &[u8], at: usize, magic: &[u8]) -> bool {
+    h.len() >= at + magic.len() && &h[at..at + magic.len()] == magic
+}
+
+/// (offset, bytes, extension) for every container identified by a fixed marker.
+const MAGIC: &[(usize, &[u8], &str)] = &[
+        (0, b"FRM8", "dff"),
+        (0, b"caff", "caf"),
+        (0, b"fLaC", "flac"),
+        (0, b"OggS", "ogg"),
+        (0, b"MAC ", "ape"),
+        (0, b"wvpk", "wv"),
+        (0, b"MPCK", "mpc"),
+        (0, b"MP+", "mpc"),
+        (0, b"TTA1", "tta"),
+        (0, b"DSD ", "dsf"),
+        (0, b".snd", "au"),
+        (0, b"#!AMR", "amr"),
+        (4, b"ftyp", "m4a"),
+        (0, &[0x1A, 0x45, 0xDF, 0xA3], "mka"),
+        (0, &[0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11], "wma"),
+        (0, &[0x72, 0x69, 0x66, 0x66, 0x2E, 0x91, 0xCF, 0x11], "w64"),
+        (0, &[0x0B, 0x77], "ac3"),
+    ];
+
+/// Names a container from the first bytes of a file. A wrong or missing
+/// extension is the most common reason a perfectly good file will not open, so
+/// the bytes get the first word.
+pub(crate) fn sniff_bytes(h: &[u8]) -> Option<&'static str> {
+    if h.len() < 4 {
+        return None;
+    }
+    if magic_at(h, 0, b"RIFF") && magic_at(h, 8, b"WAVE") {
+        return Some("wav");
+    }
+    if magic_at(h, 0, b"RF64") && magic_at(h, 8, b"WAVE") {
+        return Some("rf64");
+    }
+    if magic_at(h, 0, b"FORM") && (magic_at(h, 8, b"AIFF") || magic_at(h, 8, b"AIFC")) {
+        return Some("aiff");
+    }
+    for (at, magic, name) in MAGIC {
+        if magic_at(h, *at, magic) {
+            return Some(*name);
+        }
+    }
+    if h[0] == 0xFF && h.len() >= 3 {
+        let (b1, b2) = (h[1], h[2]);
+        // ADTS AAC has layer bits 00, which no MPEG audio frame may carry.
+        if b1 & 0xF6 == 0xF0 {
+            return Some("aac");
+        }
+        let version = (b1 >> 3) & 3;
+        let layer = (b1 >> 1) & 3;
+        if b1 & 0xE0 == 0xE0 && version != 1 && layer != 0 && (b2 >> 4) != 15 && (b2 >> 2) & 3 != 3 {
+            return Some("mp3");
+        }
+    }
+    None
+}
+
+fn read_head(file: &mut File, buf: &mut [u8]) -> usize {
+    let mut n = 0;
+    while n < buf.len() {
+        match file.read(&mut buf[n..]) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => n += k,
+        }
+    }
+    n
+}
+
+pub(crate) fn sniff(path: &Path) -> Option<&'static str> {
+    let mut file = File::open(path).ok()?;
+    let mut head = [0u8; 16];
+    let n = read_head(&mut file, &mut head);
+    if n >= 10 && &head[..3] == b"ID3" {
+        // Skip the ID3v2 tag (synchsafe size) and look at what follows it.
+        let size = (((head[6] as u64) & 0x7F) << 21)
+            | (((head[7] as u64) & 0x7F) << 14)
+            | (((head[8] as u64) & 0x7F) << 7)
+            | ((head[9] as u64) & 0x7F);
+        let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
+        file.seek(SeekFrom::Start(10 + size + footer)).ok()?;
+        let mut after = [0u8; 16];
+        let m = read_head(&mut file, &mut after);
+        return sniff_bytes(&after[..m]);
+    }
+    sniff_bytes(&head[..n])
+}
+
+/// The containers worth trying for a file, best guess first.
+pub(crate) fn candidate_exts(path: &Path, declared: &str) -> Vec<String> {
+    match sniff(path) {
+        Some(sniffed) => {
+            let mut out = vec![sniffed.to_string()];
+            if !declared.is_empty() && declared != sniffed && family(declared) == family(sniffed) {
+                out.push(declared.to_string());
+            }
+            out
+        }
+        None => vec![declared.to_string()],
+    }
+}
+
+/// Fully decoded audio, for playback of formats rodio has no reader for.
+pub struct Pcm {
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub samples: Vec<f32>,
+}
+
+/// Longest stretch kept in memory when a file has to be decoded up front
+/// (about seven minutes of 48 kHz stereo).
+pub(crate) const PCM_CAP: usize = 40_000_000;
+
+pub fn decode_pcm(path: &Path) -> AppResult<Pcm> {
+    let declared = extension(path);
+    for ext in candidate_exts(path, &declared) {
+        // Monkey's Audio has its own streaming source in the player.
+        if ext != "ape" && symphonia_exts(&ext) {
+            if let Ok(pcm) = pcm_symphonia(path, &ext) {
+                return Ok(pcm);
+            }
+        }
+    }
+    crate::external::decode_pcm(path, PCM_CAP)
+}
+
+fn pcm_symphonia(path: &Path, ext: &str) -> AppResult<Pcm> {
+    let file = File::open(path).map_err(|e| AppError::Io(format!("{}：{e}", path.display())))?;
+    match decode_pcm_reader(file, ext) {
+        Ok(pcm) => Ok(pcm),
+        Err(err) => {
+            if riff_exts(ext) {
+                if let Some(span) = embedded_mpeg_span(path) {
+                    if let Ok(slice) = FileSlice::open(path, span) {
+                        if let Ok(pcm) = decode_pcm_reader(slice, "mp3") {
+                            return Ok(pcm);
+                        }
+                    }
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
+fn decode_pcm_reader<R: MediaSource + 'static>(reader: R, ext: &str) -> AppResult<Pcm> {
+    let mss = MediaSourceStream::new(Box::new(reader), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension(ext);
+
+    let mut format = symphonia::default::get_probe()
+        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+        .map_err(|_| AppError::Unsupported)?;
+    let track = format.default_track(TrackType::Audio).ok_or(AppError::Unsupported)?;
+    let params = track.codec_params.as_ref().and_then(|p| p.audio()).ok_or(AppError::Unsupported)?;
+    let channels = params.channels.as_ref().map(|c| c.count()).unwrap_or(1).max(1);
+    let sample_rate = params.sample_rate.ok_or(AppError::Unsupported)?;
+
+    let mut codecs = CodecRegistry::new();
+    symphonia::default::register_enabled_codecs(&mut codecs);
+    codecs.register_audio_decoder::<symphonia_adapter_opus_rs::OpusAdapter>();
+    let mut decoder = codecs
+        .make_audio_decoder(params, &AudioDecoderOptions::default())
+        .map_err(|_| AppError::Unsupported)?;
+
+    let track_id = track.id;
+    let mut samples: Vec<f32> = Vec::new();
+    let mut scratch: Vec<f32> = Vec::new();
+    loop {
+        let packet = match format.next_packet() {
+            Ok(Some(p)) => p,
+            _ => break,
+        };
+        if packet.track_id != track_id {
+            continue;
+        }
+        if let Ok(buf) = decoder.decode(&packet) {
+            let n = buf.samples_interleaved();
+            scratch.resize(n, 0.0);
+            buf.copy_to_slice_interleaved(&mut scratch);
+            samples.extend_from_slice(&scratch);
+            if samples.len() >= PCM_CAP {
+                break;
+            }
+        }
+    }
+    let whole = samples.len() - samples.len() % channels;
+    samples.truncate(whole);
+    if samples.is_empty() {
+        return Err(AppError::Unsupported);
+    }
+    Ok(Pcm { channels: channels as u16, sample_rate, samples })
+}
+
 fn extension(path: &Path) -> String {
     path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
 }
@@ -259,22 +486,37 @@ fn extension(path: &Path) -> String {
 /// figures. The accumulator uses fixed sample blocks and is resampled to the
 /// requested bucket count at the end, so no prior knowledge of the duration is
 /// needed.
+///
+/// The decoders are tried in order of how much the file's own bytes say about
+/// it: the container its magic number names, the one its extension names, and
+/// finally an external ffmpeg for everything the built-in decoders cannot do.
 pub fn read_wave(path: &Path, buckets: usize) -> AppResult<Wave> {
-    let ext = extension(path);
-    if ext == "ape" {
-        return read_wave_ape(path, buckets);
+    let declared = extension(path);
+    for ext in candidate_exts(path, &declared) {
+        if ext == "ape" {
+            if let Ok(wave) = read_wave_ape(path, buckets) {
+                return Ok(wave);
+            }
+            continue;
+        }
+        if symphonia_exts(&ext) {
+            if let Ok(wave) = read_wave_symphonia(path, &ext, buckets) {
+                return Ok(wave);
+            }
+        }
     }
-    if !symphonia_exts(&ext) {
-        return Err(AppError::Unsupported);
-    }
+    crate::external::read_wave(path, buckets)
+}
+
+fn read_wave_symphonia(path: &Path, ext: &str, buckets: usize) -> AppResult<Wave> {
     let file = File::open(path).map_err(|e| AppError::Io(format!("{}：{e}", path.display())))?;
-    match decode_symphonia(file, &ext, buckets) {
+    match decode_symphonia(file, ext, buckets) {
         Ok(wave) => Ok(wave),
         Err(err) => {
             // Some WAV files carry MP3 frames instead of PCM. The RIFF reader
             // rejects them, but the frames themselves decode once the header is
             // skipped.
-            if riff_exts(&ext) {
+            if riff_exts(ext) {
                 if let Some(span) = embedded_mpeg_span(path) {
                     if let Ok(slice) = FileSlice::open(path, span) {
                         if let Ok(wave) = decode_symphonia(slice, "mp3", buckets) {
@@ -432,7 +674,7 @@ pub(crate) fn pcm_sample(bytes: &[u8], float: bool, big_endian: bool, signed8: b
     }
 }
 
-struct WaveAccum {
+pub(crate) struct WaveAccum {
     blocks: Vec<(f32, f32)>,
     min: f32,
     max: f32,
@@ -443,7 +685,7 @@ struct WaveAccum {
 }
 
 impl WaveAccum {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             blocks: Vec::new(),
             min: f32::INFINITY,
@@ -455,7 +697,7 @@ impl WaveAccum {
         }
     }
 
-    fn push(&mut self, frame: &[f32]) {
+    pub(crate) fn push(&mut self, frame: &[f32]) {
         if frame.is_empty() {
             return;
         }
@@ -485,7 +727,7 @@ impl WaveAccum {
         }
     }
 
-    fn finish(mut self, buckets: usize) -> Option<Wave> {
+    pub(crate) fn finish(mut self, buckets: usize) -> Option<Wave> {
         if self.filled > 0 {
             self.blocks.push((self.min, self.max));
         }

@@ -177,7 +177,9 @@ fn probe_file(
         container: meta_info.as_ref().and_then(|m| m.container.clone()),
         peak_db: wave.as_ref().map(|w| w.peak_db),
         rms_db: wave.as_ref().map(|w| w.rms_db),
-        decodeable: wave.is_some(),
+        // With waveforms switched off nothing was decoded, so "readable
+        // properties" is the best available proof the file is real audio.
+        decodeable: if settings.gen_peaks { wave.is_some() } else { meta_info.is_some() },
         clipped: wave.as_ref().map(|w| w.clipped).unwrap_or(false),
         peaks: wave.as_ref().map(|w| db::peaks_to_bytes(&w.peaks)),
     };
@@ -504,5 +506,67 @@ pub fn rebuild(db: SharedDb, app: AppHandle, buckets: usize, control: ScanContro
     let _ = app.emit(
         "scan://done",
         ScanSummary { scanned: total, added: 0, updated: total, removed: 0, errors: 0, seconds: 0.0 },
+    );
+}
+
+/// Re-reads every file marked undecodable, in parallel. Whatever now decodes
+/// gets its waveform and properties; the rest stay marked.
+pub fn retry_failed(db: SharedDb, app: AppHandle, buckets: usize, control: ScanControl) {
+    control.running.store(true, Ordering::SeqCst);
+    control.abort.store(false, Ordering::SeqCst);
+    let list = match db.lock() {
+        Ok(conn) => db::undecodable_tracks(&conn).unwrap_or_default(),
+        Err(_) => {
+            control.running.store(false, Ordering::SeqCst);
+            return;
+        }
+    };
+    let total = list.len() as i64;
+    emit(&app, "重新解析", 0, total, "");
+    let next = AtomicUsize::new(0);
+    let (tx, rx) = mpsc::channel::<(i64, String, Option<probe::Meta>, Option<probe::Wave>)>();
+    let mut fixed = 0i64;
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count() {
+            let tx = tx.clone();
+            let list = &list;
+            let next = &next;
+            let control = &control;
+            scope.spawn(move || loop {
+                if control.abort.load(Ordering::Relaxed) {
+                    break;
+                }
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some((id, path)) = list.get(i) else { break };
+                let p = Path::new(path);
+                let meta = probe::read_meta(p).ok();
+                let wave = probe::read_wave(p, buckets.max(32)).ok();
+                if tx.send((*id, path.clone(), meta, wave)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(tx);
+        let mut done = 0i64;
+        for (id, path, meta, wave) in rx {
+            done += 1;
+            if let Ok(conn) = db.lock() {
+                if let Some(w) = &wave {
+                    if let Some(m) = &meta {
+                        let _ = db::update_meta(&conn, id, m);
+                    }
+                    let _ = db::set_wave(&conn, id, &db::peaks_to_bytes(&w.peaks), w.peak_db, w.rms_db, w.clipped);
+                    fixed += 1;
+                }
+            }
+            if done % 8 == 0 || done == total {
+                emit(&app, "重新解析", done, total, &path);
+            }
+        }
+    });
+    control.running.store(false, Ordering::SeqCst);
+    let _ = app.emit(
+        "scan://done",
+        ScanSummary { scanned: total, added: 0, updated: fixed, removed: 0, errors: total - fixed, seconds: 0.0 },
     );
 }

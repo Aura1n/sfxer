@@ -214,7 +214,7 @@ fn open_source(path: &str) -> AppResult<Box<dyn Source + Send>> {
         .map(|e| e.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
-    if ext == "ape" {
+    if ext == "ape" || probe::sniff(file_path) == Some("ape") {
         return Ok(Box::new(ApeSource::open(path)?));
     }
 
@@ -235,8 +235,72 @@ fn open_source(path: &str) -> AppResult<Box<dyn Source + Send>> {
                     }
                 }
             }
+            // Everything rodio has no reader for (Opus, AIFF, CAF, Matroska,
+            // ADTS, WMA through ffmpeg ...) is decoded up front by the same
+            // fallback chain the waveform uses, so what draws also plays.
+            if let Ok(pcm) = probe::decode_pcm(file_path) {
+                if let Some(src) = PcmSource::new(pcm) {
+                    return Ok(Box::new(src));
+                }
+            }
             Err(AppError::Other(format!("该文件无法解码播放：{err}")))
         }
+    }
+}
+
+/// Audio decoded in full and played from memory. Only reached for files the
+/// streaming decoders refuse, and capped in length by `probe::PCM_CAP`.
+struct PcmSource {
+    channels: ChannelCount,
+    sample_rate: SampleRate,
+    samples: Vec<f32>,
+    pos: usize,
+}
+
+impl PcmSource {
+    fn new(pcm: probe::Pcm) -> Option<Self> {
+        Some(Self {
+            channels: NonZeroU16::new(pcm.channels)?,
+            sample_rate: NonZeroU32::new(pcm.sample_rate)?,
+            samples: pcm.samples,
+            pos: 0,
+        })
+    }
+}
+
+impl Iterator for PcmSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        let sample = *self.samples.get(self.pos)?;
+        self.pos += 1;
+        Some(sample)
+    }
+}
+
+impl Source for PcmSource {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> ChannelCount {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        let frames = self.samples.len() as u64 / self.channels.get() as u64;
+        Some(Duration::from_micros(frames * 1_000_000 / self.sample_rate.get() as u64))
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        let frame = (pos.as_micros() as u64).saturating_mul(self.sample_rate.get() as u64) / 1_000_000;
+        let index = (frame as usize).saturating_mul(self.channels.get() as usize);
+        self.pos = index.min(self.samples.len());
+        Ok(())
     }
 }
 

@@ -257,6 +257,40 @@ pub fn rebuild_peaks(app: AppHandle, state: State<AppState>) -> Cmd<bool> {
     Ok(true)
 }
 
+/// Re-reads only the files the library marked undecodable: after a decoder
+/// upgrade, or after ffmpeg was installed, this is all that needs repeating.
+#[tauri::command]
+pub fn retry_undecodable(app: AppHandle, state: State<AppState>) -> Cmd<bool> {
+    if state.scan.running.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+    let guard = conn(&state.db);
+    let buckets = db::get_settings(&guard).map_err(fail)?.peak_buckets.max(32) as usize;
+    drop(guard);
+    state.scan.running.store(true, Ordering::SeqCst);
+    let control = state.scan.clone();
+    let db_arc = state.db.clone();
+    std::thread::spawn(move || scan::retry_failed(db_arc, app, buckets, control));
+    Ok(true)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecoderInfo {
+    pub ffmpeg: Option<String>,
+    pub ffprobe: Option<String>,
+}
+
+/// Which optional external decoders were found, for the settings page.
+#[tauri::command]
+pub fn decoder_info() -> DecoderInfo {
+    let (ffmpeg, ffprobe) = crate::external::status();
+    DecoderInfo {
+        ffmpeg: ffmpeg.map(|p| p.display().to_string()),
+        ffprobe: ffprobe.map(|p| p.display().to_string()),
+    }
+}
+
 /* ----------------------------------------------------------------- tracks */
 
 #[tauri::command]

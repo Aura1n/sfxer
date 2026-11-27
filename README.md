@@ -15,6 +15,8 @@ Windows 10 / 11 x64，Tauri 2 + Rust，单文件约 8 MB。
 - 搜索名称、显示名、标签与备注；按格式、时长、采样率、声道、评分星级筛选
 - 详情栏五星评分，只写数据库，不碰文件元数据
 - 波形解码与峰值分析，可按峰值 dB 排序；APE 与 WAV 内封装 MP3 也能播放和生成波形
+- 列表表头可拖动：拖右边缘调整列宽，拖标题改变列的顺序；左右分栏与侧栏上下分隔都能用鼠标拖动，布局自动记住
+- 解析能力：按文件头识别真实格式（扩展名写错也能读），元数据与波形逐一尝试所有候选解码器；装有 ffmpeg 时自动兜底 WMA、AC3、AMR、WavPack、TTA、DSD 等；设置里可「重试失败项」
 - 批量打标、批量备注、整理模式（`T`）逐条连续打标
 - 名称左侧勾选栏，支持 `Shift` 连选、`Ctrl` 切换；右键「删除文件」可批量把源文件移到回收站
 - 底部播放条：波形拖动定位、音量、顺序播放 / 列表循环 / 单曲循环，当前筛选列表即播放队列
@@ -28,8 +30,24 @@ npm install
 cd src-tauri && cargo build --release   # 产物 src-tauri/target/release/sfxer.exe
 npx tauri build                          # 另需联网下载 NSIS 工具，产出安装包
 node tools/make-test-audio.mjs          # 生成 test-library/ 样例音频（不入库）
-cargo test --lib                         # 18 项后端测试，依赖上一步生成的样例音频
+cargo test --lib                         # 后端测试，依赖上一步生成的样例音频
 ```
+
+### 一键脚本
+
+```bat
+scripts\sfx.cmd test             :: 生成样例音频 + cargo test + clippy
+scripts\sfx.cmd build            :: 构建安装包并复制到 release\
+scripts\sfx.cmd version 0.9.7    :: 同步 package / Cargo / tauri 里所有版本号
+scripts\sfx.cmd release          :: 检查 → 测试 → 构建 → 提交 → tag → 推送 → GitHub Release
+scripts\sfx.cmd ffmpeg           :: 下载 ffmpeg 到 %APPDATA%\dev.zara.sfxer\ffmpeg
+```
+
+需要在 GitHub 上构建时，可在 Actions 页手动运行 `Release` 工作流（选择对应 tag）。
+
+### 可选：ffmpeg
+
+内置解码器读不了的文件（WMA、AC3、AMR、WavPack、TTA、DSD 等）会交给 ffmpeg。程序不自带它，按以下顺序查找 `ffmpeg.exe` 与 `ffprobe.exe`：程序所在目录（及其 `ffmpeg`、`ffmpeg\bin`、`tools` 子目录）→ `%APPDATA%\dev.zara.sfxer\ffmpeg` → PATH。放好后重启，在 设置 → 导入与扫描 点「重试失败项」。
 
 ## 快捷键
 

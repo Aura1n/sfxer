@@ -57,6 +57,9 @@
             <div class="side-list" id="scopes"></div>
           </section>
 
+          <div class="grip-side" id="grip-side" role="separator" aria-orientation="horizontal"
+               title="拖动调整范围与标签的高度 · 双击恢复默认"></div>
+
           <section class="side-block grow">
             <div class="side-head" id="tags-head">
               <span data-icon="tag" class="head-icon"></span><span class="head-title">标签</span>
@@ -72,7 +75,7 @@
         </nav>
 
         <div class="grip grip-left" id="grip-sidebar" role="separator" aria-orientation="vertical" tabindex="0"
-             aria-label="调整侧栏宽度" aria-valuemin="180" aria-valuemax="440" aria-valuenow="232"
+             aria-label="调整侧栏宽度" aria-valuemin="180" aria-valuemax="560" aria-valuenow="232"
              title="拖动调整侧栏宽度 · 双击恢复默认"></div>
 
         <section class="list-pane">
@@ -84,7 +87,7 @@
         </section>
 
         <div class="grip grip-right" id="grip-detail" role="separator" aria-orientation="vertical" tabindex="0"
-             aria-label="调整详情栏宽度" aria-valuemin="330" aria-valuemax="660" aria-valuenow="372"
+             aria-label="调整详情栏宽度" aria-valuemin="300" aria-valuemax="1000" aria-valuenow="372"
              title="拖动调整详情栏宽度 · 双击恢复默认"></div>
 
         <aside class="detail" id="detail" aria-label="详情">
@@ -169,6 +172,7 @@
     <script src="./tag-render.js"></script>
     <script src="./player-view.js"></script>
     <script src="./tauri-drag.js"></script>
+    <script src="./layout.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

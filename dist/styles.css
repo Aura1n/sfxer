@@ -363,8 +363,9 @@ html[data-theme="dark"] .badge {
   position: absolute;
   top: 0;
   bottom: var(--gap-pane);
-  width: var(--gap-pane);
-  margin: 0;
+  /* The visible gap is only 8px; the hit area reaches 4px into both neighbours. */
+  width: calc(var(--gap-pane) + 8px);
+  margin: 0 0 0 -4px;
   padding: 0;
   border: 0;
   background: none;
@@ -379,6 +380,7 @@ html[data-theme="dark"] .badge {
 
 .grip-right {
   right: var(--detail-w);
+  margin: 0 -4px 0 0;
 }
 
 .body.no-sidebar .grip-left,
@@ -396,14 +398,16 @@ html[data-theme="dark"] .badge {
   margin-left: -1px;
   border-radius: 1px;
   background: var(--accent);
-  opacity: 0;
-  transition: opacity 0.12s;
+  opacity: 0.16;
+  transition: opacity 0.12s, width 0.12s;
 }
 
 .grip:hover::after,
 .grip:focus-visible::after,
 .grip.on::after {
-  opacity: 0.55;
+  opacity: 0.8;
+  width: 3px;
+  margin-left: -1.5px;
 }
 
 .grip:focus-visible {
@@ -439,6 +443,61 @@ html.resizing * {
 
 .side-block + .side-block {
   border-top: 1px solid var(--stroke);
+}
+
+/* The scope list keeps its natural height; squeezing it hid the entries at its
+   foot ("最常播放", "不可解码"). The tag list takes whatever is left, and the
+   splitter below lets the user trade the two. */
+.side-block:not(.grow) {
+  flex: 0 0 auto;
+}
+
+.grip-side {
+  flex: none;
+  position: relative;
+  z-index: 6;
+  height: 7px;
+  margin: -3px 0;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.grip-side::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 3px;
+  height: 1px;
+  border-radius: 1px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.grip-side:hover::after,
+.grip-side.on::after {
+  opacity: 0.8;
+  top: 2.5px;
+  height: 2px;
+}
+
+html.row-resizing,
+html.row-resizing * {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+
+html.col-resizing,
+html.col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+html.col-moving,
+html.col-moving * {
+  cursor: grabbing !important;
+  user-select: none !important;
 }
 
 .side-block.grow {
@@ -621,7 +680,12 @@ html.resizing * {
   color: var(--text-2);
 }
 
+.cols-head {
+  position: relative;
+}
+
 .cols-head button {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -660,6 +724,64 @@ html.resizing * {
 .cols-head .sorted .arrow {
   opacity: 1;
   color: var(--accent);
+}
+
+/* Resize handle on the right edge of every movable heading. The headings
+   overlap their neighbours by a few pixels (negative margins), so the handle is
+   centred on the boundary between two cells. */
+.col-grip {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  right: -4px;
+  width: 11px;
+  z-index: 3;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.col-grip::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 5px;
+  width: 1px;
+  background: var(--stroke-strong);
+  opacity: 0.45;
+  transition: opacity 0.12s;
+}
+
+.col-grip:hover::after,
+.col-grip.on::after {
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: 3px;
+  border-radius: 1.5px;
+  background: var(--accent);
+  opacity: 0.9;
+}
+
+.cols-head button.dragging {
+  background: var(--bg-hover);
+  opacity: 0.55;
+}
+
+.cols-head button.hcell {
+  cursor: grab;
+}
+
+.col-drop {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 4;
 }
 
 .cols-head .col-restore {

@@ -1,0 +1,42 @@
+name: Release
+
+# Manual only: scripts\sfx.cmd release already builds and publishes from the
+# local machine, and a tag-triggered run here would race it for the same Release.
+# Run this from the Actions tab on a tag ref to build on GitHub instead.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Build
+        run: npx tauri build
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          New-Item -ItemType Directory -Force dist-release | Out-Null
+          Copy-Item "src-tauri/target/release/bundle/nsis/sfxer_${v}_x64-setup.exe" "dist-release/"
+          Copy-Item "src-tauri/target/release/sfxer.exe" "dist-release/sfxer_${v}_x64-portable.exe"
+          $log = Get-Content CHANGELOG.md -Raw
+          $m = [regex]::Match($log, "(?ms)^## $([regex]::Escape($v))\b[^\r\n]*\r?\n(.*?)(?=^## |\z)")
+          $notes = if ($m.Success) { $m.Groups[1].Value.Trim() } else { "sfxer $v" }
+          Set-Content dist-release/notes.md $notes -Encoding utf8
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: sfxer ${{ github.ref_name }}
+          body_path: dist-release/notes.md
+          files: dist-release/*.exe

@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod error;
+mod external;
 mod model;
 mod player;
 mod probe;
@@ -68,6 +69,8 @@ pub fn run() {
             commands::find_duplicates,
             commands::ignore_duplicates,
             commands::rebuild_peaks,
+            commands::retry_undecodable,
+            commands::decoder_info,
             commands::query,
             commands::track_detail,
             commands::track_peaks,

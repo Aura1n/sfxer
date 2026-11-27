@@ -607,3 +607,76 @@ fn stars_are_clamped_to_five_and_a_floor_filters_the_list() {
     f.min_rating = 0;
     assert_eq!(db::query(&conn, &f).unwrap().total, 1, "no floor keeps everything");
 }
+
+#[test]
+fn sniff_names_containers_by_their_magic_numbers() {
+    use crate::probe::sniff_bytes;
+    assert_eq!(sniff_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt "), Some("wav"));
+    assert_eq!(sniff_bytes(b"FORM\x00\x00\x00\x00AIFFCOMM"), Some("aiff"));
+    assert_eq!(sniff_bytes(b"fLaC\x00\x00\x00\x22"), Some("flac"));
+    assert_eq!(sniff_bytes(b"OggS\x00\x02"), Some("ogg"));
+    assert_eq!(sniff_bytes(b"MAC \x96\x0f"), Some("ape"));
+    assert_eq!(sniff_bytes(b"wvpk\x00\x00"), Some("wv"));
+    assert_eq!(sniff_bytes(b"\x00\x00\x00\x20ftypM4A "), Some("m4a"));
+    assert_eq!(sniff_bytes(&[0xFF, 0xFB, 0x90, 0x00]), Some("mp3"));
+    assert_eq!(sniff_bytes(&[0xFF, 0xF1, 0x50, 0x80]), Some("aac"));
+    assert_eq!(sniff_bytes(b"just some text, not audio"), None);
+    // Bitrate index 15 can never start an MPEG frame.
+    assert_eq!(sniff_bytes(&[0xFF, 0xFB, 0xF0, 0x00]), None);
+}
+
+#[test]
+fn a_wrong_extension_does_not_hide_what_the_file_really_is() {
+    let dir = std::env::temp_dir().join("sfx-manager-test-sniff");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let riff = dir.join("really-a-wav.mp3");
+    std::fs::write(&riff, b"RIFF\x24\x00\x00\x00WAVEfmt ").unwrap();
+    assert_eq!(probe::candidate_exts(&riff, "mp3"), vec!["wav".to_string()]);
+
+    // Same family: the extension stays as a second guess.
+    let ogg = dir.join("opus-in-ogg.opus");
+    std::fs::write(&ogg, b"OggS\x00\x02\x00\x00").unwrap();
+    assert_eq!(probe::candidate_exts(&ogg, "opus"), vec!["ogg".to_string(), "opus".to_string()]);
+
+    // Nothing recognisable: the extension is all there is.
+    let text = dir.join("notes.wav");
+    std::fs::write(&text, b"plain text pretending to be audio").unwrap();
+    assert_eq!(probe::candidate_exts(&text, "wav"), vec!["wav".to_string()]);
+}
+
+#[test]
+fn a_mislabelled_wav_still_reads_when_the_library_exists() {
+    if skip_if_no_library("a_mislabelled_wav") {
+        return;
+    }
+    let dir = std::env::temp_dir().join("sfx-manager-test-mislabel");
+    std::fs::create_dir_all(&dir).unwrap();
+    let copy = dir.join("sine-but-called-mp3.mp3");
+    std::fs::copy(library().join("tones/sine-440.wav"), &copy).unwrap();
+    let meta = probe::read_meta(&copy).expect("the bytes say WAV, so it reads as WAV");
+    assert_eq!(meta.sample_rate, Some(48000));
+    let wave = probe::read_wave(&copy, 128).expect("and it decodes");
+    assert!(wave.peak_db > -60.0);
+}
+
+#[test]
+fn a_fresh_library_is_stamped_with_the_current_schema_version() {
+    let db = temp_db("schema-version");
+    let conn = db.lock().unwrap();
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(version, db::SCHEMA_VERSION);
+}
+
+#[test]
+fn undecodable_tracks_lists_only_the_failures() {
+    let db = temp_db("undecodable-list");
+    let conn = db.lock().unwrap();
+    db::upsert_track(&conn, &placeholder_track(), false).unwrap();
+    assert!(db::undecodable_tracks(&conn).unwrap().is_empty());
+    let id = db::query(&conn, &Filter::default()).unwrap().items[0].id;
+    db::mark_undecodable(&conn, id).unwrap();
+    let failed = db::undecodable_tracks(&conn).unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].0, id);
+}

@@ -128,7 +128,8 @@
     updateGo: $("update-go"),
   };
 
-  const visibleCols = () => COLS.filter((c) => !S.colsOff.includes(c.key) || c.fixed);
+  // Order and widths are the user's (layout.js); hidden columns are filtered first.
+  const visibleCols = () => window.ColLayout.arrange(COLS.filter((c) => !S.colsOff.includes(c.key) || c.fixed));
   const gridTemplate = () => visibleCols().map((c) => c.w).join(" ");
 
   function applyTemplate() {
@@ -179,6 +180,7 @@
         renderHead();
         renderRows();
       });
+      window.ColLayout.mark(b, c);
       dom.colsHead.appendChild(b);
     }
   }
@@ -226,6 +228,29 @@
     });
     return restore;
   }
+
+  // Widths change while the pointer moves, so existing rows are re-templated in
+  // place instead of being rebuilt.
+  function relayout() {
+    applyTemplate();
+    const tpl = gridTemplate();
+    for (const row of dom.rowsVirtual.children) row.style.gridTemplateColumns = tpl;
+  }
+
+  function layoutOverflows() {
+    if (dom.colsHead.scrollWidth > dom.colsHead.clientWidth + 2) return true;
+    const row = dom.rowsVirtual.firstElementChild;
+    return !!row && row.scrollWidth > row.clientWidth + 2;
+  }
+
+  window.ColLayout.bind(dom.colsHead, {
+    relayout,
+    overflow: layoutOverflows,
+    reorder: () => {
+      renderHead();
+      renderRows();
+    },
+  });
 
   /* -------------------------------------------------------------------- rows */
   let rafPending = false;
@@ -899,7 +924,7 @@
     // Playback lives in the bar under the list, so the panel only explains a file
     // the machine cannot preview at all.
     if (!d.decodeable) {
-      head.appendChild(el("div", "bulk-note", "该文件使用本机无法解码的编码（如 WMA），仍可检索、打标与备注。"));
+      head.appendChild(el("div", "bulk-note", "该文件暂时无法解码，仍可检索、打标与备注。装上 ffmpeg 后到 设置 → 导入与扫描 点「重试失败项」可再试。"));
     }
 
     const tagSec = section("标签", "tag");
@@ -989,12 +1014,12 @@
   // columns — follows. Widths are layout state, so they live in localStorage
   // beside the show/hide flags rather than in the library.
   const PANE = {
-    sidebar: { v: "--sidebar-w", def: 232, min: 180, max: 440, key: "paneSidebar", grip: "grip-sidebar", off: "no-sidebar" },
-    detail: { v: "--detail-w", def: 372, min: 330, max: 660, key: "paneDetail", grip: "grip-detail", off: "no-detail" },
+    sidebar: { v: "--sidebar-w", def: 232, min: 180, max: 560, key: "paneSidebar", grip: "grip-sidebar", off: "no-sidebar" },
+    detail: { v: "--detail-w", def: 372, min: 300, max: 1000, key: "paneDetail", grip: "grip-detail", off: "no-detail" },
   };
   // Trailing columns are the first thing to fall when a pane is widened, so the
   // list keeps a floor; hiding columns (⋯ / header menu) buys back room.
-  const LIST_MIN = 560;
+  const LIST_MIN = 420;
 
   const gapPane = () =>
     parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--gap-pane")) || 8;
@@ -1732,6 +1757,25 @@
       await api.rebuildPeaks();
     });
     scan.appendChild(setRow("重建全部波形", "修改精度或升级解码器后使用；大库需要数分钟", rb));
+
+    const rt = el("button", "btn subtle", "重试失败项");
+    rt.addEventListener("click", async () => {
+      dom.dlgSettings.close();
+      await api.retryUndecodable();
+    });
+    scan.appendChild(
+      setRow("重新解析不可解码的文件", "只处理「不可解码」范围内的文件；升级或安装 ffmpeg 后点一次即可", rt)
+    );
+    const dec = S.decoder || {};
+    scan.appendChild(
+      setRow(
+        "外部解码器 (ffmpeg)",
+        dec.ffmpeg
+          ? `已找到：${dec.ffmpeg}${dec.ffprobe ? "" : "（缺少 ffprobe，属性读取会受限）"}。WMA、AC3、AMR、WavPack、TTA、DSD 等会自动用它解析和播放`
+          : "未找到。把 ffmpeg.exe 与 ffprobe.exe 放在程序同目录、%APPDATA%\\dev.zara.sfxer\\ffmpeg，或加入 PATH，重启后生效（可运行 scripts\\sfx.cmd ffmpeg 自动下载）",
+        el("span", "set-hint", dec.ffmpeg ? "可用" : "未安装")
+      )
+    );
 
     const src = setGroup("来源", "folder");
     const addFiles = el("button", "btn subtle");
@@ -2915,6 +2959,7 @@
       if (saved > 0) setPaneWidth(k, saved);
       bindGrip($(PANE[k].grip), k);
     }
+    window.ColLayout.bindSideSplit();
     $("btn-search-clear").hidden = true;
 
     const info = await api.appInfo();
@@ -2923,6 +2968,7 @@
 
     const settings = await api.settings({});
     S.settings = settings || {};
+    S.decoder = await api.decoderInfo().catch(() => ({}));
     applyTheme(S.settings.theme || "system");
 
     // The bar outlives every selection, so it is built once, here.
